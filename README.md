@@ -4,7 +4,15 @@ English | [Русский](README.ru.md)
 
 Give your application one local HTTP or SOCKS5 endpoint. If its upstream stops reaching the service you need, Proxywatch routes new connections through a working backup on the same port. If every node fails, it stops forwarding rather than sending traffic directly.
 
-Proxywatch runs on Linux. It uses [Xray](https://github.com/XTLS/Xray-core) for proxy connections and reads a Mihomo YAML subscription from any provider. It does not need a panel API or admin token.
+Proxywatch runs on Linux. It uses [Xray](https://github.com/XTLS/Xray-core) for proxy connections and reads Mihomo YAML subscriptions. It does not need a panel API or admin token.
+
+## Features
+
+- Run an HTTP proxy, a SOCKS5 TCP proxy, or both on separate loopback ports.
+- Check the target service through each node. After a confirmed failure, send new connections to a working reserve on the same local port. Return to the preferred node when it recovers.
+- Import VLESS/REALITY/Vision over TCP and Hysteria2 from a Mihomo YAML `proxies` list. View the reason for each skipped entry in the menu. A failed refresh preserves the last valid subscription.
+- Send Telegram alerts through the active proxy and use direct SMTP for a total outage or failed Telegram delivery. Menus and alerts support English and Russian.
+- Configure from JSON, read status from scripts and keep node history and queued notifications locally in SQLite.
 
 ## Install
 
@@ -47,6 +55,8 @@ proxywatch configure --stdin < settings.json
 proxywatch status --json
 ```
 
+For a single listener, set the unused port to `null` in the JSON settings. For example, `"socks_port": null` leaves only HTTP enabled. Omitting a port uses its default.
+
 Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
 
 Status reports the last saved snapshot. It includes a schema version, the configuration flag, the recorded service state, the Unix update timestamp, whether the preferred node is active, and counts for nodes and queued notifications. It also works before the first run. Exit codes are 0 for success, 1 for an operation or configuration error, and 2 for invalid command syntax.
@@ -64,8 +74,6 @@ Set `"language": "en"` or `"language": "ru"` in the settings object to select th
 Suppose node A is preferred and B is on standby. By default, Proxywatch checks A every 30 seconds. After three consecutive failures it tries the reserves. If B passes the same check, **new connections use B**. Your application keeps its proxy address, though existing connections may need to reconnect. Once A passes again, **new connections return to A**, even if B is healthy.
 
 - **Selection:** the first scan prefers the fastest successful HTTP response through a node (2xx or 3xx), not the lowest ICMP ping. The preference survives restarts. Reserves are checked every 15 minutes by default and on failover. Additional diagnostic URLs do not trigger switches.
-- **Subscriptions:** the YAML must contain a `proxies` list. Supported entries are VLESS/REALITY/Vision over TCP and Hysteria2. The UI explains skipped entries. A failed refresh preserves the last valid subscription.
-- **Alerts:** configure a Telegram bot and chat ID for delivery through the working proxy. Configure direct SMTP for total outages or failed Telegram delivery. Alerts identify the installation, the affected node, the traffic route and how many nodes are available.
 - **Local data:** each installation keeps its history and notification queue in SQLite under `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). The same directory holds subscription and notification credentials. Keep it private. Use `--directory PATH` for a separate instance.
 
 ## Project

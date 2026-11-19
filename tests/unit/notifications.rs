@@ -146,20 +146,20 @@ fn delayed_outage_and_recovery_both_reach_telegram_when_the_proxy_returns() {
         to: None,
         ..Event::default()
     };
-    let address: SocketAddr = "127.0.0.1:10809".parse().unwrap();
+    let client = Client::builder().no_proxy().build().unwrap();
     let sent = RefCell::new(Vec::new());
-    let send = |_: &Telegram, actual: SocketAddr, alert: &Alert, _: Duration| {
-        assert_eq!(actual, address);
+    let send = |_: &Telegram, actual: &Client, alert: &Alert, _: Duration| {
+        assert!(std::ptr::eq(actual, &client));
         sent.borrow_mut().push(alert.summary);
         Ok(())
     };
     let no_email = |_: &Smtp, _: &Alert, _: Duration| -> Result<()> { panic!("SMTP is disabled") };
     assert!(deliver_with(&settings, &event, None, send, no_email).is_err());
     assert!(sent.borrow().is_empty());
-    deliver_with(&settings, &event, Some(address), send, no_email).unwrap();
+    deliver_with(&settings, &event, Some(&client), send, no_email).unwrap();
     event.kind = "recovery".into();
     event.to = Some("Reserve".into());
-    deliver_with(&settings, &event, Some(address), send, no_email).unwrap();
+    deliver_with(&settings, &event, Some(&client), send, no_email).unwrap();
     let expected = test_fixtures::messages(settings.language);
     assert_eq!(
         *sent.borrow(),

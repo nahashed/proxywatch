@@ -7,10 +7,10 @@ use lettre::{
     Message, SmtpTransport, Transport, message::header::ContentType,
     transport::smtp::authentication::Credentials,
 };
-use reqwest::{Proxy, blocking::Client, redirect::Policy};
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
-use std::{io::Read, net::SocketAddr, time::Duration};
+use std::{io::Read, time::Duration};
 
 pub(crate) struct Alert {
     pub(crate) title: String,
@@ -160,27 +160,27 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
-pub fn deliver(settings: &Settings, event: &Event, http_proxy: Option<SocketAddr>) -> Result<()> {
-    deliver_with(settings, event, http_proxy, send_telegram, send_email)
+pub fn deliver(settings: &Settings, event: &Event, proxy_client: Option<&Client>) -> Result<()> {
+    deliver_with(settings, event, proxy_client, send_telegram, send_email)
 }
 
 fn deliver_with(
     settings: &Settings,
     event: &Event,
-    http_proxy: Option<SocketAddr>,
-    send_telegram: impl FnOnce(&Telegram, SocketAddr, &Alert, Duration) -> Result<()>,
+    proxy_client: Option<&Client>,
+    send_telegram: impl FnOnce(&Telegram, &Client, &Alert, Duration) -> Result<()>,
     send_email: impl FnOnce(&Smtp, &Alert, Duration) -> Result<()>,
 ) -> Result<()> {
     if settings.telegram.is_none() && settings.smtp.is_none() {
         return Ok(());
     }
-    let alert = Alert::from_event(settings, event, http_proxy.is_some())?;
+    let alert = Alert::from_event(settings, event, proxy_client.is_some())?;
     let alert = &alert;
     let timeout = Duration::from_secs(settings.timeout_seconds);
     let telegram = settings
         .telegram
         .as_ref()
-        .zip(http_proxy)
+        .zip(proxy_client)
         .filter(|_| event.kind != "outage" || settings.smtp.is_none());
     route(
         telegram.map(|(config, address)| move || send_telegram(config, address, alert, timeout)),
@@ -207,11 +207,10 @@ fn route(
 
 fn send_telegram(
     config: &Telegram,
-    address: SocketAddr,
+    client: &Client,
     alert: &Alert,
     timeout: Duration,
 ) -> Result<()> {
-    ensure!(address.ip().is_loopback(), alerts(language()).local_proxy);
     ensure!(
         config.token.split_once(':').is_some_and(|(id, secret)| {
             !id.is_empty()
@@ -223,20 +222,12 @@ fn send_telegram(
         }),
         alerts(language()).token
     );
-    let proxy = Proxy::all(format!("http://{address}"))
-        .map_err(|_| anyhow!(alerts(language()).proxy_address))?;
-    let client = Client::builder()
-        .no_proxy()
-        .proxy(proxy)
-        .redirect(Policy::none())
-        .timeout(timeout)
-        .build()
-        .map_err(|_| anyhow!(alerts(language()).client))?;
     let response = client
         .post(format!(
             "https://api.telegram.org/bot{}/sendMessage",
             config.token
         ))
+        .timeout(timeout)
         .json(&json!({
             "chat_id": config.chat_id,
             "parse_mode": "MarkdownV2",

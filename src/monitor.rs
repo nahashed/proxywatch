@@ -2,7 +2,7 @@ use crate::runtime_text::message;
 use crate::{
     engine::Engine,
     notifications,
-    relay::{Relay, Route},
+    relay::Relay,
     storage::{Event, NodeHealth, Paths, State},
     subscription::{self, Node, Subscription},
 };
@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -359,16 +358,11 @@ pub fn run(paths: &Paths) -> Result<()> {
             &mut active,
             |engine| latency(engine, &settings.check_url, timeout),
             |node| {
-                let engine = Engine::start(Path::new(&settings.xray_binary), node, timeout).ok()?;
+                let engine = Engine::start(&settings, node).ok()?;
                 let latency = latency(&engine, &settings.check_url, timeout)?;
                 Some(Measurement { engine, latency })
             },
-            |engine| {
-                relay.set(engine.map(|engine| Route {
-                    http: engine.http,
-                    socks: engine.socks,
-                }))
-            },
+            |engine| relay.set(engine.map(|engine| engine.route)),
             now,
         )?;
         if stop.load(Ordering::Relaxed) {
@@ -391,7 +385,7 @@ pub fn run(paths: &Paths) -> Result<()> {
                 let proxy = active
                     .as_ref()
                     .filter(|_| state.last_probe == Some(true))
-                    .map(|a| a.engine.http);
+                    .map(|a| &a.engine.client);
                 if notifications::deliver(&settings, event, proxy).is_err() {
                     eprintln!("{}", message!(delivery_retry));
                     notify = Instant::now() + Duration::from_secs(300);

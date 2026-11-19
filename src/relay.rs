@@ -14,8 +14,8 @@ use tokio::{
 
 #[derive(Clone, Copy)]
 pub struct Route {
-    pub http: SocketAddr,
-    pub socks: SocketAddr,
+    pub http: Option<SocketAddr>,
+    pub socks: Option<SocketAddr>,
 }
 
 pub struct Relay {
@@ -35,8 +35,7 @@ async fn serve(
         tokio::select! {
             accepted = listener.accept() => {
                 let (mut client, _) = accepted?;
-                if let Some(selected) = *route.borrow() {
-                    let endpoint = if http {selected.http} else {selected.socks};
+                if let Some(endpoint) = route.borrow().and_then(|route| if http { route.http } else { route.socks }) {
                     clients.spawn(async move {
                         let mut upstream = TcpStream::connect(endpoint).await?;
                         copy_bidirectional(&mut client, &mut upstream).await?;

@@ -1,11 +1,10 @@
 use crate::runtime_text::message;
-use crate::{config::private_config, subscription::Node};
+use crate::{config::private_config, relay::Route, storage::Settings, subscription::Node};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Proxy, Url, blocking::Client, redirect::Policy};
 use std::{
     io::{Seek, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::Path,
+    net::{Ipv4Addr, TcpListener, TcpStream},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -13,33 +12,56 @@ use std::{
 
 pub struct Engine {
     child: Child,
-    pub http: SocketAddr,
-    pub socks: SocketAddr,
-    client: Client,
+    pub route: Route,
+    pub client: Client,
 }
 
 impl Engine {
-    pub fn start(binary: &Path, node: &Node, timeout: Duration) -> Result<Self> {
-        let reserve = || TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
-        let http_listener = reserve().context(message!(reserve_http))?;
-        let socks_listener = reserve().context(message!(reserve_socks))?;
-        let http = http_listener.local_addr()?;
-        let socks = socks_listener.local_addr()?;
-        let config = private_config(node, http.port(), socks.port())?;
+    pub fn start(settings: &Settings, node: &Node) -> Result<Self> {
+        let timeout = Duration::from_secs(settings.timeout_seconds);
+        let reserve = |_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
+        let http_listener = settings
+            .http_port
+            .map(reserve)
+            .transpose()
+            .context(message!(reserve_http))?;
+        let socks_listener = settings
+            .socks_port
+            .map(reserve)
+            .transpose()
+            .context(message!(reserve_socks))?;
+        let http = http_listener
+            .as_ref()
+            .map(TcpListener::local_addr)
+            .transpose()?;
+        let socks = socks_listener
+            .as_ref()
+            .map(TcpListener::local_addr)
+            .transpose()?;
+        let config = private_config(
+            node,
+            http.map(|addr| addr.port()),
+            socks.map(|addr| addr.port()),
+        )?;
+        let proxy = match (http, socks) {
+            (Some(addr), _) => format!("http://{addr}"),
+            (None, Some(addr)) => format!("socks5h://{addr}"),
+            (None, None) => bail!(message!(no_listeners)),
+        };
         let mut input = tempfile::tempfile().context(message!(prepare_xray))?;
         serde_json::to_writer(&mut input, &config)?;
         input.flush()?;
         input.rewind()?;
         let client = Client::builder()
             .no_proxy()
-            .proxy(Proxy::all(format!("http://{http}"))?)
+            .proxy(Proxy::all(proxy)?)
             .redirect(Policy::none())
             .user_agent("Proxywatch/0.1")
             .build()
             .context(message!(create_probe))?;
         drop(http_listener);
         drop(socks_listener);
-        let child = Command::new(binary)
+        let child = Command::new(&settings.xray_binary)
             .args(["run", "-format", "json", "-config", "stdin:"])
             .env_remove("XRAY_LOCATION_CONFDIR")
             .env_remove("xray.location.confdir")
@@ -50,14 +72,13 @@ impl Engine {
             .context(message!(start_xray))?;
         let mut engine = Self {
             child,
-            http,
-            socks,
+            route: Route { http, socks },
             client,
         };
         let start = Instant::now();
         loop {
             ensure!(engine.child.try_wait()?.is_none(), message!(xray_exited));
-            if [http, socks].iter().all(|address| {
+            if [http, socks].iter().flatten().all(|address| {
                 TcpStream::connect_timeout(address, Duration::from_millis(50)).is_ok()
             }) {
                 return Ok(engine);
