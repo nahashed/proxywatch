@@ -1,4 +1,5 @@
 use crate::runtime_text::message;
+use crate::subscription_identity::HwidMode;
 use anyhow::{Context, Result, ensure};
 use reqwest::{
     Url,
@@ -31,10 +32,14 @@ fn allows_redirect(next: &Url, previous: &[Url], enabled: bool) -> bool {
                 .is_some_and(|source| next.scheme() == "https" && next.origin() == source.origin()))
 }
 
-pub fn request(client: &Client, url: Url, enabled: bool) -> Result<RequestBuilder> {
-    prepare(client, url, enabled, || {
-        fs::read_to_string("/etc/machine-id")
-    })
+pub fn request(client: &Client, url: Url, mode: &HwidMode) -> Result<RequestBuilder> {
+    match mode {
+        HwidMode::Toggle(false) => Ok(client.get(url)),
+        HwidMode::Custom(value) => request_with_header(client, url, value),
+        HwidMode::Toggle(true) => {
+            prepare(client, url, true, || fs::read_to_string("/etc/machine-id"))
+        }
+    }
 }
 
 fn prepare(
@@ -68,7 +73,11 @@ fn prepare(
     for byte in tag.as_ref() {
         write!(hex, "{byte:02x}")?;
     }
-    let mut header = HeaderValue::from_str(&hex)?;
+    request_with_header(client, url, &hex)
+}
+
+fn request_with_header(client: &Client, url: Url, value: &str) -> Result<RequestBuilder> {
+    let mut header = HeaderValue::from_str(value)?;
     header.set_sensitive(true);
     Ok(client.get(url).header("x-hwid", header))
 }

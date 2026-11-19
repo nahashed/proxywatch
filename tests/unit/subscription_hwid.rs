@@ -31,12 +31,28 @@ fn device_header_is_stable_and_scoped_to_the_https_origin() -> Result<()> {
 }
 
 #[test]
+fn custom_hwid_is_sent_without_transformation() -> Result<()> {
+    let client = Client::new();
+    let mode = crate::subscription_identity::HwidMode::Custom("cluster-main-01".into());
+    let request = request(
+        &client,
+        Url::parse("https://example.invalid/subscription")?,
+        &mode,
+    )?
+    .build()?;
+    let header = &request.headers()["x-hwid"];
+    assert_eq!(header, "cluster-main-01");
+    assert!(header.is_sensitive());
+    Ok(())
+}
+
+#[test]
 fn device_identification_is_opt_in_and_requires_https_and_valid_identity() -> Result<()> {
     let mut settings = Settings {
         subscription_url: "http://example.invalid/sub".into(),
         ..Settings::default()
     };
-    assert!(!settings.subscription_hwid);
+    assert!(!settings.subscription_hwid.enabled());
     settings.validate()?;
     let client = Client::new();
     let url = Url::parse(&settings.subscription_url)?;
@@ -44,7 +60,7 @@ fn device_identification_is_opt_in_and_requires_https_and_valid_identity() -> Re
     let request = prepare(&client, url.clone(), false, no_identity)?.build()?;
     assert!(!request.headers().contains_key("x-hwid"));
     assert!(prepare(&client, url, true, no_identity).is_err());
-    settings.subscription_hwid = true;
+    settings.subscription_hwid = crate::subscription_identity::HwidMode::Toggle(true);
     assert!(settings.validate().is_err());
     for id in ["uninitialized", "", "00000000000000000000000000000000"] {
         assert!(
@@ -144,5 +160,74 @@ fn subscription_hwid_reaches_only_the_first_origin_over_tls() -> Result<()> {
         destination.accept().unwrap_err().kind(),
         ErrorKind::WouldBlock
     );
+    Ok(())
+}
+
+#[test]
+fn custom_hwid_reaches_a_local_https_subscription_unchanged() -> Result<()> {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::Arc,
+        thread,
+        time::Duration,
+    };
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let url = Url::parse(&format!("https://{}/subscription", listener.local_addr()?))?;
+    let identity = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()])?;
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![identity.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der())
+                .into(),
+        )?;
+    let timeout = Duration::from_secs(5);
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .add_root_certificate(reqwest::Certificate::from_der(identity.cert.der())?)
+        .redirect(redirect_policy(true))
+        .build()?;
+    let mode = crate::subscription_identity::HwidMode::Custom("cluster-main-01".into());
+
+    let received = thread::scope(|scope| -> Result<_> {
+        let server = scope.spawn(move || -> Result<_> {
+            let (socket, _) = listener.accept()?;
+            let connection = rustls::ServerConnection::new(Arc::new(tls))?;
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut hwid = None;
+            for line in BufReader::new(&mut stream).lines() {
+                let line = line?;
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("x-hwid")
+                {
+                    hwid = Some(value.trim().to_owned());
+                }
+            }
+            let body = b"proxies: []\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(body)?;
+            stream.flush()?;
+            Ok(hwid)
+        });
+        let response = request(&client, url, &mode)?.send()?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            crate::subscription::parse(&response.bytes()?)?
+                .nodes
+                .is_empty()
+        );
+        server.join().expect("TLS fixture panicked")
+    })?;
+    assert_eq!(received.as_deref(), Some("cluster-main-01"));
     Ok(())
 }

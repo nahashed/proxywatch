@@ -57,7 +57,7 @@ proxywatch status --json
 
 For a single listener, set the unused port to `null` in the JSON settings. For example, `"socks_port": null` leaves only HTTP enabled. Omitting a port uses its default.
 
-If your subscription provider requires a device ID, enable HWID in subscription settings or set `"subscription_hwid": true`. Proxywatch sends an `x-hwid` header on HTTPS subscription requests to the configured origin. It derives a stable ID from the Linux machine ID and the provider’s origin. The ID stays the same for a given installation, host name and HTTPS port. Changing the Linux machine ID changes the HWID. Sending it is disabled by default.
+If your subscription provider requires a device ID, choose automatic or custom HWID in subscription settings. In JSON, `"subscription_hwid": true` derives a stable ID from the Linux machine ID and provider origin, while `"subscription_hwid": "my-cluster-id"` sends that exact value. Proxywatch sends `x-hwid` only with HTTPS subscription requests to the configured origin. Sending it is disabled by default. Use a custom value only where you have permission to assign the identifier.
 
 Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
 

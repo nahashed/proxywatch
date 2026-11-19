@@ -13,6 +13,11 @@ macro_rules! tui_en {
     (pause) => { "\nPress Enter to return to the menu." };
     (first_setup) => { "Proxywatch · First-time setup" };
     (subscription_hwid) => { "Send a device identifier (HWID) to this subscription provider over HTTPS?" };
+    (hwid_off) => { "Do not send HWID" };
+    (hwid_automatic) => { "Generate a stable HWID for this machine" };
+    (hwid_custom) => { "Use a custom HWID" };
+    (hwid_custom_notice) => { "Use a custom HWID only where you have permission to assign this identifier." };
+    (hwid_custom_value) => { "Custom HWID" };
     (subscription_url) => { "Mihomo YAML subscription URL" };
     (notification_intro) => { "Telegram sends events through the working proxy. Configure SMTP to receive email when all nodes are down." };
     (settings_title) => { "Proxywatch · Settings" };

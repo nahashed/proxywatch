@@ -21,6 +21,7 @@ macro_rules! text {
     (listeners_failed) => { "The local listeners exited with an error" };
     (hwid_https) => { "Device identification requires an HTTPS subscription URL" };
     (hwid_unavailable) => { "A valid Linux machine ID is required for device identification" };
+    (invalid_custom_hwid) => { "Custom HWID must contain 10 to 64 Latin letters, digits, '=' or '-'" };
     (invalid_subscription_url) => { "Invalid subscription URL" };
     (subscription_url_credentials) => { "The subscription requires an HTTP(S) URL without credentials" };
     (create_subscription_client) => { "Could not create the subscription client" };

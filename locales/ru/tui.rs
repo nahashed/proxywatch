@@ -13,6 +13,11 @@ macro_rules! tui_ru {
     (pause) => { "\nНажмите Enter, чтобы вернуться в меню." };
     (first_setup) => { "Proxywatch · Первая настройка" };
     (subscription_hwid) => { "Передавать идентификатор устройства (HWID) провайдеру этой подписки по HTTPS?" };
+    (hwid_off) => { "Не передавать HWID" };
+    (hwid_automatic) => { "Создать постоянный HWID для этой машины" };
+    (hwid_custom) => { "Указать свой HWID" };
+    (hwid_custom_notice) => { "Используйте свой HWID только там, где у вас есть право назначать этот идентификатор." };
+    (hwid_custom_value) => { "Свой HWID" };
     (subscription_url) => { "Ссылка на подписку Mihomo YAML" };
     (notification_intro) => { "Telegram доставляет события через рабочий выход. Для письма при потере всех узлов настройте SMTP." };
     (settings_title) => { "Proxywatch · Настройки" };

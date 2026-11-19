@@ -54,14 +54,14 @@ pub fn subscription_url(address: &str, hwid: bool) -> Result<Url> {
     Ok(url)
 }
 
-pub fn fetch(address: &str, hwid: bool) -> Result<Subscription> {
-    let url = subscription_url(address, hwid)?;
+pub fn fetch(address: &str, hwid: &crate::subscription_identity::HwidMode) -> Result<Subscription> {
+    let url = subscription_url(address, hwid.enabled())?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .user_agent("Clash.Meta/1.19 Proxywatch/0.1")
         .referer(false)
-        .redirect(crate::subscription_hwid::redirect_policy(hwid))
+        .redirect(crate::subscription_hwid::redirect_policy(hwid.enabled()))
         .build()
         .context(message!(create_subscription_client))?;
     let request = crate::subscription_hwid::request(&client, url, hwid)?;

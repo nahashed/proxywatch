@@ -21,6 +21,7 @@ macro_rules! text {
     (listeners_failed) => { "Обработчик локальных входов завершился с ошибкой" };
     (hwid_https) => { "Для передачи HWID нужен HTTPS-адрес подписки" };
     (hwid_unavailable) => { "Для передачи HWID нужен действительный идентификатор машины Linux" };
+    (invalid_custom_hwid) => { "Свой HWID должен содержать от 10 до 64 латинских букв, цифр, '=' или '-'" };
     (invalid_subscription_url) => { "Некорректный URL подписки" };
     (subscription_url_credentials) => { "Для подписки требуется HTTP(S) URL без логина и пароля" };
     (create_subscription_client) => { "Не удалось создать клиент подписки" };

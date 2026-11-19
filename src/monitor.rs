@@ -22,13 +22,13 @@ use std::{
 struct Cache {
     source: String,
     #[serde(default)]
-    subscription_hwid: bool,
+    subscription_hwid: crate::subscription_identity::HwidMode,
     data: Subscription,
 }
 
 impl Cache {
-    fn matches(&self, source: &str, hwid: bool) -> bool {
-        self.source == source && self.subscription_hwid == hwid
+    fn matches(&self, source: &str, hwid: &crate::subscription_identity::HwidMode) -> bool {
+        self.source == source && &self.subscription_hwid == hwid
     }
 }
 
@@ -319,7 +319,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     paths.save_state(&mut state)?;
     let mut data = paths
         .read::<Cache>("subscription.json")?
-        .filter(|cache| cache.matches(&settings.subscription_url, settings.subscription_hwid))
+        .filter(|cache| cache.matches(&settings.subscription_url, &settings.subscription_hwid))
         .map(|c| c.data);
     let mut refresh = Instant::now();
     let mut notify = Instant::now();
@@ -329,14 +329,14 @@ pub fn run(paths: &Paths) -> Result<()> {
     while !stop.load(Ordering::Relaxed) {
         if Instant::now() >= refresh {
             let mut delay = settings.refresh_seconds;
-            match subscription::fetch(&settings.subscription_url, settings.subscription_hwid) {
+            match subscription::fetch(&settings.subscription_url, &settings.subscription_hwid) {
                 Ok(fresh) => {
                     if data.as_ref().is_none_or(|old| old.nodes != fresh.nodes) {
                         reserve_scan = Instant::now();
                     }
                     let cache = Cache {
                         source: settings.subscription_url.clone(),
-                        subscription_hwid: settings.subscription_hwid,
+                        subscription_hwid: settings.subscription_hwid.clone(),
                         data: fresh,
                     };
                     paths.write("subscription.json", &cache)?;
@@ -443,12 +443,16 @@ mod tests {
         let mut cache: Cache = serde_json::from_value(serde_json::json!({
             "source": source, "data": {"nodes": [], "skipped": []}
         }))?;
-        assert!(cache.matches(source, false));
-        assert!(!cache.matches(source, true));
-        cache.subscription_hwid = true;
-        assert!(cache.matches(source, true));
-        assert!(!cache.matches(source, false));
-        assert!(!cache.matches("https://example.invalid/other", true));
+        let disabled = crate::subscription_identity::HwidMode::Toggle(false);
+        let automatic = crate::subscription_identity::HwidMode::Toggle(true);
+        let custom = crate::subscription_identity::HwidMode::Custom("cluster-node".into());
+        assert!(cache.matches(source, &disabled));
+        assert!(!cache.matches(source, &automatic));
+        cache.subscription_hwid = automatic.clone();
+        assert!(cache.matches(source, &automatic));
+        assert!(!cache.matches(source, &disabled));
+        assert!(!cache.matches(source, &custom));
+        assert!(!cache.matches("https://example.invalid/other", &automatic));
         Ok(())
     }
 

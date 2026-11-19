@@ -9,6 +9,7 @@ use crate::{
     i18n::Language,
     notifications::{Alert, event_label, timestamp},
     storage::{PRESETS, Paths, Settings, Smtp, State, Telegram},
+    subscription_identity::HwidMode,
 };
 
 include!("../locales/en/tui.rs");
@@ -283,14 +284,42 @@ impl Interface {
     }
 
     fn subscription(&self, settings: &mut Settings) -> Result<()> {
-        settings.subscription_url = self.secret(
+        let subscription_url = self.secret(
             tui!(self.language, subscription_url),
             &settings.subscription_url,
         )?;
-        settings.subscription_hwid = self.confirm(
+        let default = match settings.subscription_hwid {
+            HwidMode::Toggle(false) => 0,
+            HwidMode::Toggle(true) => 1,
+            HwidMode::Custom(_) => 2,
+        };
+        let Some(choice) = self.select(
             tui!(self.language, subscription_hwid),
-            settings.subscription_hwid,
-        )?;
+            &[
+                tui!(self.language, hwid_off),
+                tui!(self.language, hwid_automatic),
+                tui!(self.language, hwid_custom),
+            ],
+            default,
+        )?
+        else {
+            return Ok(());
+        };
+        let subscription_hwid = match choice {
+            0 => HwidMode::Toggle(false),
+            1 => HwidMode::Toggle(true),
+            2 => {
+                self.line(tui!(self.language, hwid_custom_notice))?;
+                let current = match &settings.subscription_hwid {
+                    HwidMode::Custom(value) => value.as_str(),
+                    HwidMode::Toggle(_) => "",
+                };
+                HwidMode::Custom(self.secret(tui!(self.language, hwid_custom_value), current)?)
+            }
+            _ => unreachable!(),
+        };
+        settings.subscription_url = subscription_url;
+        settings.subscription_hwid = subscription_hwid;
         Ok(())
     }
 
