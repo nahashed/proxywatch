@@ -21,15 +21,17 @@ curl -fsSLo install.sh https://github.com/nahashed/proxywatch/releases/latest/do
   sudo bash install.sh
 ```
 
-The installer verifies the archive with SHA-256. Proxywatch uses [Xray-core](https://github.com/XTLS/Xray-core) 26.7.28 or later. If a compatible installation is missing, interactive setup offers to install a verified copy of Xray 26.7.28 in `/usr/local/lib/proxywatch/xray`. The installer leaves the system Xray in place. Extracting the engine archive requires unzip or Python 3. For unattended installation, use `--non-interactive --with-xray`. See `bash install.sh --help` for offline and version-specific installation.
+If you are already root, run `bash install.sh` without `sudo`.
+
+The installer checks SHA-256 and uses an existing compatible [Xray-core](https://github.com/XTLS/Xray-core) (26.7.28 or later). If Xray is missing or too old, it installs a verified copy of 26.7.28 in `/usr/local/lib/proxywatch/xray` automatically. The system copy stays available to other applications. On Debian or Ubuntu, the online installer uses APT to install `unzip` if both `unzip` and Python 3 are missing. Use `--non-interactive` for unattended installation. See `bash install.sh --help` for offline installation or a specific version.
 
 Updates preserve settings and the database. An identical release leaves the installed application and its running service untouched. When files change, the installer restarts the invoking account’s active packaged service if available and reports when a manual restart is needed. The primary command is `proxywatch`. The installer adds the shortcut `pwch` when available.
 
 ## First run
 
-1. On a fresh interactive install, setup opens for the invoking account. You can reopen it with `proxywatch`. Choose a language, name the installation, enter the subscription URL, and choose a URL that your applications need to reach.
-2. Choose the local protocols and ports. Optionally configure Telegram, SMTP, or subscription device identification.
-3. Save the settings. On a system with an available systemd user manager, Proxywatch enables and starts its installed user service. Otherwise setup shows the command for running in the foreground. Point your application at the chosen local endpoint.
+1. Interactive installation opens setup for the invoking account whenever its settings are missing, including after an interrupted install. You can reopen it with `proxywatch`. Choose a language, name the installation, enter the subscription URL, and choose a URL that your applications need to reach.
+2. Choose the local protocols and ports. If another Xray already listens on your preferred port, test Proxywatch on a free port first. To reuse the original address, free that listener before switching. Optionally configure Telegram, SMTP, or subscription device identification.
+3. Save the settings. On a system with an available systemd user manager, Proxywatch enables and starts its installed user service. In a console without a user manager (for example, some Proxmox `pct enter` sessions), the installer still completes. After saving, you can start Proxywatch in that terminal. It runs until you press Ctrl+C or close the session. Point your application at the chosen local endpoint.
 
 Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 

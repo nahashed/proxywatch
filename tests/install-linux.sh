@@ -7,7 +7,7 @@ for platform in linux/amd64 linux/arm64; do
         -v "$assets:/release:ro" debian:bookworm-slim bash -se -- "$version" <<'LINUX'
 set -euo pipefail
 tag=$1
-setup() { bash /release/install.sh --from /release --version "$tag"; }
+setup() { bash /release/install.sh --from /release --version "$tag" "$@"; }
 cd /release
 sha256sum -c SHA256SUMS
 binary=/usr/local/bin/proxywatch
@@ -19,8 +19,14 @@ cat > /tmp/user-bin/xray <<'XRAY'
 touch /tmp/untrusted-xray-executed
 XRAY
 chmod 755 /tmp/user-bin/xray
-output=$(PATH="/tmp/user-bin:$PATH" setup)
-[[ $output == *'Use --with-xray'* && ! -e /tmp/untrusted-xray-executed ]]
+archive=proxywatch-${tag#v}-linux-$(uname -m).tar.gz
+mkdir /tmp/no-xray
+cp /release/SHA256SUMS "/release/$archive" /tmp/no-xray/
+if output=$(PATH="/tmp/user-bin:$PATH" bash /release/install.sh --from /tmp/no-xray --version "$tag" 2>&1); then exit 1; fi
+[[ $output == *'offline release directory'* && $output == *'--without-xray'* ]]
+[[ ! -e /tmp/untrusted-xray-executed && ! -e "$binary" ]]
+output=$(PATH="/tmp/user-bin:$PATH" setup --without-xray)
+[[ $output == *'Xray installation skipped'* && ! -e /tmp/untrusted-xray-executed ]]
 [[ ! -e /usr/local/lib/proxywatch/xray ]]
 cat > /usr/local/bin/xray <<'XRAY'
 #!/bin/sh
@@ -32,6 +38,16 @@ chmod 755 /usr/local/bin/xray
 output=$(bash /release/install.sh --from /release --version "$tag" --with-xray)
 [[ $output == *'Using Xray 26.7.28 at /usr/local/bin/xray'* ]]
 [[ $(cat /tmp/xray-probe-uid) == 65534 && ! -e /usr/local/lib/proxywatch/xray ]]
+# A valid system engine can be reused even when the private copy is obsolete.
+private_xray=/usr/local/lib/proxywatch/xray
+mkdir -p "${private_xray%/*}"
+sed 's/Xray 26.7.28/Xray 25.1.1/' /usr/local/bin/xray > "$private_xray"
+chmod 755 "$private_xray"
+engines=$(sha256sum "$private_xray" /usr/local/bin/xray)
+output=$(setup)
+[[ $output == *'Using Xray 26.7.28 at /usr/local/bin/xray'* ]]
+[[ $(sha256sum "$private_xray" /usr/local/bin/xray) == "$engines" ]]
+rm "$private_xray"
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 [[ $(pwch --version) == "$(proxywatch --version)" ]]
 test -s "$unit"
@@ -71,8 +87,9 @@ if bash /release/install.sh --from /tmp/invalid --version "$tag"; then exit 1; f
 
 rm -- /usr/bin/pwch
 install -m 755 /bin/true /usr/local/bin/pwch
-output=$(setup)
-[[ $output == *'Running instances need a restart'* ]]
+output=$(setup 2>&1)
+[[ $output == *'User service manager unavailable'* && $output == *'Restart any running foreground instance'* ]]
+[[ $output != *'Failed to connect'* && $output != *'systemctl --user'* ]]
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 cmp /bin/true /usr/local/bin/pwch
 before=$(stat -c '%i %y' "$binary" "$unit")
@@ -85,24 +102,30 @@ rm -- /usr/local/bin/pwch
 [[ $(stat -c '%i %y' "$binary" "$unit") == "$before" ]]
 kill -0 "$previous_pid"
 [[ $(sha256sum settings.json state.sqlite3) == "$state" ]]
-# Consent alone cannot install a corrupt private engine or replace a system installation.
+# Default repair rejects a corrupt private engine and preserves the system installation.
 sed -i 's/Xray 26.7.28/Xray 25.1.1/' /usr/local/bin/xray
 old_engine=$(sha256sum /usr/local/bin/xray)
 mkdir /tmp/invalid-xray
 cp /release/SHA256SUMS "/release/$archive" /tmp/invalid-xray/
 printf invalid > /tmp/invalid-xray/Xray-linux-64.zip
 printf invalid > /tmp/invalid-xray/Xray-linux-arm64-v8a.zip
-if bash /release/install.sh --from /tmp/invalid-xray --version "$tag" --with-xray; then exit 1; fi
+if output=$(bash /release/install.sh --from /tmp/invalid-xray --version "$tag" 2>&1); then exit 1; fi
+[[ $output == *'Xray archive SHA-256 mismatch'* ]]
 [[ $(sha256sum /usr/local/bin/xray) == "$old_engine" && ! -e /usr/local/lib/proxywatch/xray ]]
-output=$(printf 'n\n' | script -qec "bash /release/install.sh --from /tmp/invalid-xray --version $tag" /dev/null)
-[[ $output == *'older than 26.7.28'* && $output == *'Install Xray'* && $output == *'already installed'* ]]
+output=$(bash /release/install.sh --from /tmp/invalid-xray --version "$tag" --without-xray)
+[[ $output == *'older than 26.7.28'* && $output == *'Xray installation skipped'* && $output == *'already installed'* ]]
 [[ ! -e /usr/local/lib/proxywatch/xray ]]
+sed -i 's/Xray 25.1.1/Xray 26.7.28/' /usr/local/bin/xray
 
 # Only the distributed user unit may be restarted, and only after a change.
+mkdir -p /run/user
+install -d -m 0700 /run/user/0
+perl -MSocket -e 'my $s; socket($s, AF_UNIX, SOCK_STREAM, 0) && bind($s, sockaddr_un("/run/user/0/bus")) or die $!'
 cat > /usr/bin/systemctl <<'SYSTEMD'
 #!/bin/sh
 test "$1" = --user || exit 2
 case "$2" in
+    show-environment) test "$XDG_RUNTIME_DIR" = /run/user/0 && test "$DBUS_SESSION_BUS_ADDRESS" = unix:path=/run/user/0/bus ;;
     is-active) exit 0 ;;
     show)
         case "$3" in
@@ -136,6 +159,14 @@ cp /bin/bash "/tmp/previous/$older/proxywatch"
 rm "$binary"
 output=$(printf 'n\n' | SUDO_UID=65534 script -qec 'bash /release/install.sh --from /tmp/previous --version v0.0.0' /dev/null)
 [[ $output == *'wizard-uid=65534'* ]]
+# Leaving setup before Save must also reopen it on an unchanged install and on an update.
+for change in unchanged update; do
+    if [[ $change == update ]]; then install /bin/true "$binary"; fi
+    output=$(SUDO_UID=65534 script -qec 'bash /release/install.sh --from /tmp/previous --version v0.0.0' /dev/null </dev/null)
+    [[ $output == *'wizard-uid=65534'* ]]
+done
+output=$(SUDO_UID=65534 script -qec 'bash /release/install.sh --from /tmp/previous --version v0.0.0 --non-interactive' /dev/null </dev/null)
+[[ $output == *'Setup is pending'* && $output != *'wizard-uid'* ]]
 printf 'PASS: %s %s\n' "$(uname -m)" "$tag"
 LINUX
 done

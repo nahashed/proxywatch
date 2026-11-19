@@ -33,6 +33,8 @@ macro_rules! tui {
 pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
     let terminal = Term::stderr();
     let mut ui = Interface {
+        installer_setup: !explicit_directory
+            && std::env::var_os("PROXYWATCH_INSTALL_SETUP").is_some_and(|value| value == "1"),
         explicit_directory,
         language: if paths.has_settings() {
             paths.load_settings()?.language
@@ -48,7 +50,7 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
             return Ok(());
         };
         ui.set_language(language);
-        if !ui.setup(paths)? {
+        if !ui.setup(paths)? || ui.installer_setup {
             return Ok(());
         }
     }
@@ -81,6 +83,7 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
 }
 
 struct Interface {
+    installer_setup: bool,
     explicit_directory: bool,
     language: Language,
     terminal: Term,
@@ -284,9 +287,9 @@ impl Interface {
         use crate::user_service::{Applied, UserService, foreground_command};
 
         let service = UserService::installed(paths.directory(), self.explicit_directory);
-        if let Some((binary, [major, minor, patch])) =
-            crate::xray_binary::inspect_binary(&settings.xray_binary)
-        {
+        let xray = crate::xray_binary::inspect_binary(&settings.xray_binary);
+        let xray_ready = xray.is_some();
+        if let Some((binary, [major, minor, patch])) = xray {
             // The service manager can have a different PATH from the interactive shell.
             if let Some(binary) = binary.to_str() {
                 settings.xray_binary = binary.to_owned();
@@ -307,13 +310,26 @@ impl Interface {
             Some(Applied::Started) => self.line(tui!(self.language, service_started))?,
             Some(Applied::Restarted) => self.line(tui!(self.language, service_restarted))?,
             Some(Applied::Failed) => self.line(tui!(self.language, service_failed))?,
+            None if self.installer_setup && first_setup && xray_ready => {
+                self.line(tui!(self.language, saved_without_service))?;
+                if self.confirm(tui!(self.language, run_in_terminal), false)? {
+                    use std::os::unix::process::CommandExt;
+                    let error = std::process::Command::new(std::env::current_exe()?)
+                        .arg("run")
+                        .exec();
+                    return Err(error.into());
+                }
+                self.line(&tui!(self.language, run_later, foreground_command(None)))?;
+            }
             Some(Applied::Inactive) | None => {
                 let command =
                     foreground_command(self.explicit_directory.then_some(paths.directory()));
                 self.line(&tui!(self.language, saved_foreground, command))?;
             }
         }
-        self.pause()?;
+        if !self.installer_setup || !first_setup {
+            self.pause()?;
+        }
         Ok(true)
     }
 

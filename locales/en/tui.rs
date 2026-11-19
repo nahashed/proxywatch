@@ -36,6 +36,9 @@ macro_rules! tui_en {
     (service_started) => { "Settings saved. The Proxywatch user service is enabled and running." };
     (service_restarted) => { "Settings saved. The running Proxywatch user service restarted with your changes." };
     (service_failed) => { "Settings saved. The user service could not be started or restarted. Check systemctl --user status proxywatch.service." };
+    (saved_without_service) => { "Settings saved. Automatic service management is unavailable." };
+    (run_in_terminal) => { "Run Proxywatch in this terminal now? Ctrl+C or closing the terminal stops it." };
+    (run_later) => { "To start later, run {}." };
     (saved_foreground) => { "Settings saved. Run in the foreground with {}. Restart any foreground instance to apply changes." };
     (xray_binary) => { "Xray executable name or path" };
     (instance_name) => { "Installation name" };

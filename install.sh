@@ -9,10 +9,11 @@ fail() { printf 'Proxywatch: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     printf '%s\n' \
-        'Usage: bash install.sh [--version vX.Y.Z] [--from DIRECTORY] [--with-xray] [--non-interactive]' \
+        'Usage: bash install.sh [--version vX.Y.Z] [--from DIRECTORY] [--with-xray|--without-xray] [--non-interactive]' \
         'Without options, install the latest public stable release for this Linux host.' \
         'For an offline install, provide both the version and the release assets directory.' \
-        'Use --with-xray to install a private engine if no supported Xray is found.' \
+        'Xray is installed for Proxywatch when no supported engine is found (--with-xray).' \
+        'Use --without-xray to manage the engine yourself.' \
         'Use --non-interactive to skip all prompts and the setup wizard.'
 }
 
@@ -97,34 +98,36 @@ check_xray() {
 }
 
 prepare_xray() {
-    local path answer archive expected actual directory
+    local path archive expected actual directory
     for path in "$private_xray" /usr/local/bin/xray /usr/bin/xray; do
         if check_xray "$path"; then return 0; fi
     done
     printf 'Proxywatch needs Xray %s or later.\n' "$xray_version"
     if [[ $with_xray != true ]]; then
-        if [[ $interactive != true ]]; then
-            printf 'Use --with-xray to install the tested engine for Proxywatch.\n'
-            return 0
-        fi
-        printf 'Install Xray %s for Proxywatch at %s? [y/N] ' "$xray_version" "$private_xray"
-        if ! read -r answer || [[ ${answer,,} != y && ${answer,,} != yes ]]; then
-            printf 'Set the Xray path in Proxywatch before starting the daemon.\n'
-            return 0
-        fi
+        printf 'Xray installation skipped (--without-xray). Set the engine path before starting Proxywatch.\n'
+        return 0
     fi
     case "$architecture" in
         x86_64) archive=Xray-linux-64.zip; expected=8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40 ;;
         aarch64) archive=Xray-linux-arm64-v8a.zip; expected=f5698bb218ada3b4022db26fafc39601c5f53b46b19eb76c9616325985807501 ;;
     esac
     if [[ -n $source_dir ]]; then
-        [[ -f $source_dir/$archive ]] || fail "Place the official v$xray_version $archive in the offline release directory"
+        [[ -f $source_dir/$archive ]] || fail "Place the official v$xray_version $archive in the offline release directory, or use --without-xray to manage Xray yourself"
         cp -- "$source_dir/$archive" "$work/xray.zip"
     else
         download "https://github.com/XTLS/Xray-core/releases/download/v$xray_version/$archive" "$work/xray.zip"
     fi
     actual=$(sha256sum < "$work/xray.zip")
     [[ ${actual%% *} == "$expected" ]] || fail 'Xray archive SHA-256 mismatch'
+    if ! command -v unzip >/dev/null && ! command -v python3 >/dev/null; then
+        [[ -z $source_dir ]] || fail 'Offline Xray extraction requires unzip or Python 3'
+        command -v apt-get >/dev/null || fail 'Install unzip or Python 3 to extract the verified Xray archive'
+        printf 'Installing unzip with APT to extract the verified Xray archive.\n'
+        if ! apt-cache policy unzip | awk '$1 == "Candidate:" && $2 != "(none)" { found=1 } END { exit !found }'; then
+            DEBIAN_FRONTEND=noninteractive apt-get update
+        fi
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-upgrade unzip
+    fi
     if command -v unzip >/dev/null; then
         unzip -p "$work/xray.zip" xray > "$work/xray"
     elif command -v python3 >/dev/null; then
@@ -146,38 +149,84 @@ with zipfile.ZipFile(sys.argv[1]) as archive, archive.open("xray") as binary:
     printf 'Installed Xray %s at %s.\n' "$xray_version" "$private_xray"
 }
 
-as_owner() {
-    if [[ -n ${SUDO_UID:-} && ${SUDO_UID:-} != 0 ]]; then
-        [[ $SUDO_UID =~ ^[0-9]+$ ]] || fail 'Invalid sudo user ID'
-        local account
-        account=$(id -nu -- "$SUDO_UID") || fail 'Cannot resolve the invoking account'
-        runuser -u "$account" -- env -u XDG_CONFIG_HOME \
-            XDG_RUNTIME_DIR="/run/user/$SUDO_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_UID/bus" \
-            PATH=/usr/local/bin:/usr/bin:/bin "$@"
-    else
-        env PATH=/usr/local/bin:/usr/bin:/bin "$@"
+prepare_owner() {
+    local uid=${SUDO_UID:-0} runtime socket account
+    local -a bus_environment
+    [[ $uid =~ ^[0-9]+$ ]] || fail 'Invalid sudo user ID'
+    runtime=/run/user/$uid
+    owner_command=(env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS)
+    if [[ $uid != 0 ]]; then
+        account=$(id -nu -- "$uid") || fail 'Cannot resolve the invoking account'
+        owner_command=(runuser -u "$account" -- "${owner_command[@]}" -u XDG_CONFIG_HOME)
     fi
+    owner_command+=(PATH=/usr/local/bin:/usr/bin:/bin)
+    manager_available=false
+    # Container consoles can lack login-session variables even with a live user manager.
+    if [[ -d $runtime && ! -L $runtime && $(stat -c '%u:%a' -- "$runtime") == "$uid:700" ]] && trusted_path /run/user; then
+        for socket in "$runtime/bus" "$runtime/systemd/private"; do
+            [[ -S $socket && ! -L $socket && $(stat -c %u -- "$socket") == "$uid" ]] || continue
+            bus_environment=(XDG_RUNTIME_DIR="$runtime")
+            if [[ $socket == "$runtime/bus" ]]; then
+                bus_environment+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$socket")
+            fi
+            if [[ -x /usr/bin/systemctl ]] &&
+                "${owner_command[@]}" "${bus_environment[@]}" /usr/bin/systemctl --user show-environment >/dev/null 2>&1; then
+                owner_command+=("${bus_environment[@]}")
+                manager_available=true
+                break
+            fi
+        done
+    fi
+}
+
+owner_systemctl() {
+    "${owner_command[@]}" /usr/bin/systemctl --user "$@" 2>/dev/null
 }
 
 apply_update() {
     local fragment dropins
-    if [[ -x /usr/bin/systemctl ]] && as_owner /usr/bin/systemctl --user is-active --quiet proxywatch.service; then
-        fragment=$(as_owner /usr/bin/systemctl --user show --property=FragmentPath --value proxywatch.service) || fail 'Could not identify the active user service'
-        dropins=$(as_owner /usr/bin/systemctl --user show --property=DropInPaths --value proxywatch.service) || fail 'Could not identify user service overrides'
-        if [[ $fragment == "$unit" && -z $dropins ]]; then
-            as_owner /usr/bin/systemctl --user daemon-reload
-            as_owner /usr/bin/systemctl --user try-restart proxywatch.service
-            as_owner /usr/bin/systemctl --user is-active --quiet proxywatch.service || fail 'Proxywatch user service did not become active'
-            printf 'Restarted the active Proxywatch user service.\n'
-            return 0
-        fi
+    if [[ $manager_available != true ]]; then
+        printf 'User service manager unavailable. Restart any running foreground instance to use the updated files.\n'
+        return
     fi
-    printf 'Running instances need a restart. For a user service, run as its owner: systemctl --user daemon-reload && systemctl --user restart proxywatch.service\n'
+    if ! owner_systemctl is-active --quiet proxywatch.service; then
+        printf 'No active Proxywatch user service. Restart any running foreground instance to use the updated files.\n'
+        return
+    fi
+    fragment=$(owner_systemctl show --property=FragmentPath --value proxywatch.service) || fail 'Could not identify the active user service'
+    dropins=$(owner_systemctl show --property=DropInPaths --value proxywatch.service) || fail 'Could not identify user service overrides'
+    if [[ $fragment != "$unit" || -n $dropins ]]; then
+        printf 'The active Proxywatch user service is customized. Restart it as its owner to use the updated files.\n'
+        return
+    fi
+    owner_systemctl daemon-reload &&
+        owner_systemctl try-restart proxywatch.service &&
+        owner_systemctl is-active --quiet proxywatch.service ||
+        fail 'Proxywatch user service did not restart'
+    printf 'Restarted the active Proxywatch user service.\n'
+}
+
+finish_install() {
+    local changed=$1
+    claim_alias
+    flock -u "$install_lock"
+    exec {install_lock}<&-
+    prepare_owner
+    if [[ $changed == true ]]; then apply_update; fi
+    if "${owner_command[@]}" /bin/sh -c 'test -f "${XDG_CONFIG_HOME-$HOME/.config}/proxywatch/settings.json"'; then return; fi
+    if [[ $interactive != true ]]; then
+        printf 'Setup is pending. Run proxywatch as the service owner to configure it.\n'
+        return
+    fi
+    printf 'Opening first-time setup.\n'
+    cleanup
+    trap - EXIT HUP INT TERM
+    exec "${owner_command[@]}" PROXYWATCH_INSTALL_SETUP=1 "PROXYWATCH_SETUP_XRAY=$selected_xray" "$binary" tui
 }
 
 version=''
 source_dir=''
-with_xray=false
+with_xray=true
 interactive=false
 if [[ -t 0 && -t 1 ]]; then interactive=true; fi
 while (($#)); do
@@ -187,6 +236,7 @@ while (($#)); do
             if [[ $1 == --version ]]; then version=$2; else source_dir=$2; fi
             shift 2 ;;
         --with-xray) with_xray=true; shift ;;
+        --without-xray) with_xray=false; shift ;;
         --non-interactive) interactive=false; shift ;;
         --help|-h) usage; exit 0 ;;
         *) fail "Unknown option: $1 (see --help)" ;;
@@ -273,9 +323,7 @@ prepare_xray
 if [[ -x $binary && -s $unit ]] && cmp --silent -- "$work/proxywatch" "$binary" &&
     cmp --silent -- "$work/proxywatch.service" "$unit"; then
     printf 'Proxywatch %s is already installed.\n' "$tag"
-    claim_alias
-    flock -u "$install_lock"
-    if [[ $xray_changed == true ]]; then apply_update; fi
+    finish_install "$xray_changed"
     exit 0
 fi
 
@@ -288,14 +336,9 @@ install -m 0644 -- "$work/proxywatch.service" "$unit_stage"
 mv -fT -- "$unit_stage" "$unit"
 mv -fT -- "$binary_stage" "$binary"
 
-claim_alias
-flock -u "$install_lock"
 if [[ $updating == true ]]; then
     printf 'Updated Proxywatch on disk to %s.\n' "$tag"
-    apply_update
 else
-    printf 'Installed Proxywatch %s. Run proxywatch to open setup.\n' "$tag"
-    if [[ $interactive == true ]]; then
-        as_owner "PROXYWATCH_SETUP_XRAY=$selected_xray" "$binary" tui
-    fi
+    printf 'Installed Proxywatch %s.\n' "$tag"
 fi
+finish_install "$updating"

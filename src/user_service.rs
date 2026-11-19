@@ -1,6 +1,9 @@
 use std::{
     env, fs,
-    os::unix::ffi::OsStrExt,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt},
+    },
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -18,6 +21,7 @@ pub enum Applied {
 
 pub struct UserService<'a> {
     systemctl: &'a Path,
+    runtime: PathBuf,
     active: bool,
 }
 
@@ -29,17 +33,28 @@ impl UserService<'static> {
         {
             return None;
         }
+        let uid = fs::metadata("/proc/self").ok()?.uid();
+        let runtime = PathBuf::from(format!("/run/user/{uid}"));
+        if !has_owner_socket(&runtime, uid) {
+            return None;
+        }
         Self::discover(
             Path::new("/usr/bin/systemctl"),
             directory,
             Path::new(FRAGMENT),
+            &runtime,
         )
     }
 }
 
 impl<'a> UserService<'a> {
-    fn discover(systemctl: &'a Path, directory: &Path, fragment: &Path) -> Option<Self> {
-        let control = |args: &[&str]| invoke(systemctl, args);
+    fn discover(
+        systemctl: &'a Path,
+        directory: &Path,
+        fragment: &Path,
+        runtime: &Path,
+    ) -> Option<Self> {
+        let control = |args: &[&str]| invoke(systemctl, runtime, args);
         let environment = control(&["show-environment"])?;
         // A shell and its user manager can resolve XDG_CONFIG_HOME differently.
         if manager_directory(&environment.stdout)?
@@ -78,7 +93,11 @@ impl<'a> UserService<'a> {
             property("ActiveState=")?,
             "active" | "activating" | "reloading"
         );
-        Some(Self { systemctl, active })
+        Some(Self {
+            systemctl,
+            runtime: runtime.to_owned(),
+            active,
+        })
     }
 
     pub fn apply(&self, first_setup: bool) -> Applied {
@@ -89,8 +108,13 @@ impl<'a> UserService<'a> {
         } else {
             return Applied::Inactive;
         };
-        if invoke(self.systemctl, args).is_some()
-            && invoke(self.systemctl, &["is-active", "--quiet", UNIT]).is_some()
+        if invoke(self.systemctl, &self.runtime, args).is_some()
+            && invoke(
+                self.systemctl,
+                &self.runtime,
+                &["is-active", "--quiet", UNIT],
+            )
+            .is_some()
         {
             success
         } else {
@@ -99,8 +123,22 @@ impl<'a> UserService<'a> {
     }
 }
 
-fn invoke(systemctl: &Path, args: &[&str]) -> Option<Output> {
+fn has_owner_socket(runtime: &Path, uid: u32) -> bool {
+    if !fs::symlink_metadata(runtime)
+        .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == 0o700)
+    {
+        return false;
+    }
+    ["bus", "systemd/private"].iter().any(|name| {
+        fs::symlink_metadata(runtime.join(name))
+            .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+    })
+}
+
+fn invoke(systemctl: &Path, runtime: &Path, args: &[&str]) -> Option<Output> {
     let output = Command::new(systemctl)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .arg("--user")
         .args(args)
         .stdin(Stdio::null())
