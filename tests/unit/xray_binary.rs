@@ -29,3 +29,24 @@ fn checks_a_selected_executable_and_ignores_its_unrelated_output() -> std::io::R
     }
     Ok(())
 }
+
+#[test]
+fn resolves_legacy_engine_paths_without_changing_custom_choices() {
+    let known = ["private", "system", "distribution"];
+    let choose = |configured, working: &[&str]| {
+        select_binary(configured, &known, |path| {
+            working.contains(&path).then(|| path.to_owned())
+        })
+    };
+    assert_eq!(choose("system", &["private"]).as_deref(), Some("private"));
+    assert_eq!(choose("private", &["system"]).as_deref(), Some("system"));
+    assert_eq!(
+        choose("system", &["private", "system"]).as_deref(),
+        Some("system")
+    );
+    assert_eq!(
+        choose("xray", &["xray", "private"]).as_deref(),
+        Some("private")
+    );
+    assert_eq!(choose("custom", &["private"]), None);
+}

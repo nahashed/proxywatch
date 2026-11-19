@@ -301,7 +301,8 @@ fn latency(engine: &Engine, url: &str, timeout: Duration) -> Option<u64> {
 
 pub fn run(paths: &Paths) -> Result<()> {
     let _lock = paths.lock()?;
-    let settings = paths.load_settings()?;
+    let mut settings = paths.load_settings()?;
+    crate::xray_binary::select_for_run(&mut settings.xray_binary);
     let timeout = Duration::from_secs(settings.timeout_seconds);
     let stop = Arc::new(AtomicBool::new(false));
     let (wake, sleep) = mpsc::sync_channel(1);

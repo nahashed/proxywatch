@@ -6,6 +6,7 @@ use std::{
 };
 
 const PRIVATE_XRAY: &str = "/usr/local/lib/proxywatch/xray";
+const STANDARD_BINARIES: [&str; 3] = [PRIVATE_XRAY, "/usr/local/bin/xray", "/usr/bin/xray"];
 const MINIMUM_VERSION: [u32; 3] = [26, 7, 28];
 
 fn executable(path: &Path) -> bool {
@@ -13,7 +14,7 @@ fn executable(path: &Path) -> bool {
 }
 
 pub fn default_binary() -> &'static str {
-    [PRIVATE_XRAY, "/usr/local/bin/xray", "/usr/bin/xray"]
+    STANDARD_BINARIES
         .into_iter()
         .find(|path| executable(Path::new(path)))
         .unwrap_or("xray")
@@ -45,6 +46,43 @@ fn version_number(output: &[u8]) -> Option<[u32; 3]> {
 }
 
 pub fn inspect_binary(configured: &str) -> Option<(PathBuf, [u32; 3])> {
+    select_binary(configured, &STANDARD_BINARIES, probe_binary)
+}
+
+// Old settings can name the system Xray even after the installer added a newer private copy.
+fn select_binary<T>(
+    configured: &str,
+    standard: &[&str],
+    mut probe: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    if configured == "xray" {
+        return standard
+            .iter()
+            .find_map(|path| probe(path))
+            .or_else(|| probe(configured));
+    }
+    probe(configured).or_else(|| {
+        if standard.contains(&configured) {
+            standard
+                .iter()
+                .filter(|&&path| path != configured)
+                .find_map(|path| probe(path))
+        } else {
+            None
+        }
+    })
+}
+
+pub fn select_for_run(configured: &mut String) {
+    if (configured == "xray" || STANDARD_BINARIES.contains(&configured.as_str()))
+        && let Some((path, _)) = inspect_binary(configured)
+        && let Some(path) = path.to_str()
+    {
+        *configured = path.to_owned();
+    }
+}
+
+fn probe_binary(configured: &str) -> Option<(PathBuf, [u32; 3])> {
     let path = if configured.contains('/') {
         std::path::absolute(configured).ok()?
     } else {
