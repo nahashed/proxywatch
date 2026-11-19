@@ -12,6 +12,9 @@ mod relay;
 mod runtime_text;
 mod storage;
 mod subscription;
+#[cfg(test)]
+#[path = "../tests/unit/fixtures.rs"]
+mod test_fixtures;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};

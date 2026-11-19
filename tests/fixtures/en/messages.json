@@ -1,0 +1,20 @@
+{
+  "invalid_target": "Custom URL",
+  "missing_server": "Node 1. The server field must contain a string",
+  "switch": "Switched outbound node",
+  "available": "Available nodes: 1 of 2",
+  "started": "Service started: 01\\.01\\.1970 00:00:01 UTC",
+  "node_change": "\n🟢 Backup: available\nTraffic: Primary\nAvailable nodes: 3 of 4",
+  "purpose": "Purpose: Monitoring",
+  "snapshot": "Node availability summary",
+  "nodes": "Node availability changed",
+  "failback": "Returned to the preferred node",
+  "outage": "All nodes are unavailable",
+  "recovery": "Connection restored",
+  "backup_up": "Backup: available",
+  "both_available": "Available nodes: 2 of 2",
+  "stopped": "Traffic: stopped",
+  "primary": "Traffic: Primary",
+  "truncated": "Additional nodes: 495",
+  "delayed": "All nodes were previously unavailable"
+}
