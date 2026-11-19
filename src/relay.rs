@@ -1,3 +1,4 @@
+use crate::runtime_text::message;
 use anyhow::{Context, Result, ensure};
 use std::{
     io,
@@ -59,7 +60,7 @@ impl Relay {
         for (port, is_http) in [(http, true), (socks, false)] {
             if let Some(port) = port {
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-                    .with_context(|| format!("Локальный порт {port} недоступен"))?;
+                    .with_context(|| message!(port_unavailable, port))?;
                 listener.set_nonblocking(true)?;
                 listeners.push((listener, is_http));
             }
@@ -76,7 +77,7 @@ impl Relay {
             }
             tokio::select! {
                 _ = stopped => Ok(()),
-                ended = servers.join_next() => ended.ok_or_else(|| io::Error::other("Нет локальных входов"))?.map_err(io::Error::other)?,
+                ended = servers.join_next() => ended.ok_or_else(|| io::Error::other(message!(no_listeners)))?.map_err(io::Error::other)?,
             }
         }))?;
         Ok(Self {
@@ -89,7 +90,7 @@ impl Relay {
     pub fn set(&self, route: Option<Route>) -> Result<()> {
         ensure!(
             !self.worker.as_ref().is_some_and(|w| w.is_finished()),
-            "Обработчик локальных входов остановлен"
+            message!(listeners_stopped)
         );
         self.route.send_replace(route);
         Ok(())
@@ -104,7 +105,7 @@ impl Drop for Relay {
         if let Some(worker) = self.worker.take()
             && !matches!(worker.join(), Ok(Ok(())))
         {
-            eprintln!("Обработчик локальных входов завершился с ошибкой");
+            eprintln!("{}", message!(listeners_failed));
         }
     }
 }

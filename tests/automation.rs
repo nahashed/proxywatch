@@ -107,3 +107,58 @@ fn status_reads_only_a_public_summary_without_initializing_storage() -> Result<(
     assert_eq!(report["updated_at"], 27);
     Ok(())
 }
+
+#[test]
+fn language_changes_help_and_errors_but_not_status_json_or_exit_codes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path();
+    let settings = path.join("settings.json");
+    fs::write(
+        &settings,
+        br#"{"subscription_url":"https://example.invalid/sub"}"#,
+    )?;
+    let mut reports = Vec::new();
+    for (language, heading, error_label) in
+        [("ru", "Использование", "Ошибка"), ("en", "Usage", "Error")]
+    {
+        if language == "en" {
+            let payload =
+                json!({"language": language, "subscription_url": "https://example.invalid/sub"});
+            assert!(
+                cli(
+                    path,
+                    &["configure", "--stdin"],
+                    &serde_json::to_vec(&payload)?
+                )?
+                .status
+                .success()
+            );
+        }
+        for args in [
+            &["--help"][..],
+            &["configure", "--help"],
+            &["help", "status"],
+        ] {
+            let help = cli(path, args, &[])?;
+            assert!(help.status.success() && help.stderr.is_empty());
+            assert!(String::from_utf8(help.stdout)?.contains(heading));
+        }
+        let report = cli(path, &["status", "--json"], &[])?;
+        assert!(report.status.success() && report.stderr.is_empty());
+        reports.push(report.stdout);
+        let error = cli(path, &["configure", "--stdin"], b"private-canary")?;
+        assert_eq!(error.status.code(), Some(1));
+        let message = String::from_utf8(error.stderr)?;
+        assert!(message.starts_with(error_label) && !message.contains("private-canary"));
+        assert_eq!(cli(path, &["status"], &[])?.status.code(), Some(2));
+    }
+    assert_eq!(reports[0], reports[1]);
+    fs::write(&settings, b"{broken-private-canary")?;
+    let fixed = cli(
+        path,
+        &["configure", "--stdin"],
+        br#"{"language":"en","subscription_url":"https://example.invalid"}"#,
+    )?;
+    assert!(fixed.status.success() && fixed.stdout.is_empty() && fixed.stderr.is_empty());
+    Ok(())
+}

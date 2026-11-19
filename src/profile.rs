@@ -1,57 +1,57 @@
-use anyhow::{Context, Result, bail, ensure};
+use crate::runtime_text::{NodeResult, node_error, require};
 use serde_json::{Map, Value};
 use std::net::IpAddr;
 
-pub fn validate_outbound(value: &Value) -> Result<()> {
+pub fn validate_outbound(value: &Value) -> NodeResult<()> {
     let outbound = fields(value, &["protocol", "settings", "streamSettings"])?;
     match string(outbound, "protocol")? {
         "vless" => validate_vless(&value["settings"], &value["streamSettings"]),
         "hysteria" => validate_hysteria(&value["settings"], &value["streamSettings"]),
-        _ => bail!("Неподдерживаемый выход Xray"),
+        _ => Err(node_error!(unsupported_outbound)),
     }
 }
 
-fn validate_vless(settings: &Value, stream: &Value) -> Result<()> {
+fn validate_vless(settings: &Value, stream: &Value) -> NodeResult<()> {
     fields(settings, &["vnext"])?;
     let server = single(&settings["vnext"])?;
     fields(server, &["address", "port", "users"])?;
     endpoint(server)?;
     let account = fields(single(&server["users"])?, &["id", "encryption", "flow"])?;
-    ensure!(
+    require!(
         uuid::Uuid::parse_str(string(account, "id")?).is_ok(),
-        "Некорректный UUID VLESS"
+        invalid_uuid
     );
-    ensure!(
+    require!(
         string(account, "encryption")? == "none",
-        "Поддерживается шифрование VLESS none"
+        require_encryption_none
     );
-    ensure!(
+    require!(
         matches!(
             string(account, "flow")?,
             "xtls-rprx-vision" | "xtls-rprx-vision-udp443"
         ),
-        "Требуется XTLS Vision"
+        require_vision
     );
     fields(stream, &["network", "security", "realitySettings"])?;
-    ensure!(
+    require!(
         stream["network"] == "raw" && stream["security"] == "reality",
-        "Требуется REALITY поверх RAW/TCP"
+        require_reality_tcp
     );
     let reality = fields(
         &stream["realitySettings"],
         &["serverName", "publicKey", "shortId", "fingerprint"],
     )?;
     host(string(reality, "serverName")?)?;
-    ensure!(
+    require!(
         base64_url_bytes(string(reality, "publicKey")?, 32),
-        "Некорректный публичный ключ REALITY"
+        invalid_public_key
     );
     if let Some(short_id) = optional(reality, "shortId")? {
-        ensure!(
+        require!(
             short_id.len() <= 16
                 && short_id.len().is_multiple_of(2)
                 && short_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "Некорректный short-id REALITY"
+            invalid_short_id
         );
     }
     if let Some(value) = optional(reality, "fingerprint")? {
@@ -60,7 +60,7 @@ fn validate_vless(settings: &Value, stream: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_hysteria(settings: &Value, stream: &Value) -> Result<()> {
+fn validate_hysteria(settings: &Value, stream: &Value) -> NodeResult<()> {
     fields(settings, &["version", "address", "port"])?;
     endpoint(settings)?;
     fields(
@@ -73,14 +73,14 @@ fn validate_hysteria(settings: &Value, stream: &Value) -> Result<()> {
             "finalmask",
         ],
     )?;
-    ensure!(
+    require!(
         settings["version"] == 2 && stream["network"] == "hysteria" && stream["security"] == "tls",
-        "Требуется Hysteria2 с TLS"
+        require_hysteria_tls
     );
     let transport = fields(&stream["hysteriaSettings"], &["version", "auth"])?;
-    ensure!(
+    require!(
         transport.get("version").and_then(Value::as_u64) == Some(2),
-        "Требуется транспорт Hysteria2"
+        require_hysteria_transport
     );
     string(transport, "auth")?;
     let tls = fields(
@@ -88,27 +88,24 @@ fn validate_hysteria(settings: &Value, stream: &Value) -> Result<()> {
         &["serverName", "alpn", "pinnedPeerCertSha256"],
     )?;
     let name = string(tls, "serverName")?;
-    ensure!(
-        !name.eq_ignore_ascii_case("fromMitm"),
-        "Неподдерживаемое имя TLS"
-    );
+    require!(!name.eq_ignore_ascii_case("fromMitm"), unsupported_tls_name);
     host(name)?;
     if let Some(alpn) = tls.get("alpn") {
-        ensure!(
+        require!(
             alpn.as_array().is_some_and(|items| !items.is_empty()
                 && items
                     .iter()
                     .all(|item| item.as_str().is_some_and(|value| !value.is_empty()
                         && value.len() <= 255
                         && !value.chars().any(char::is_control)))),
-            "Некорректный TLS ALPN"
+            invalid_alpn
         );
     }
     if let Some(pin) = optional(tls, "pinnedPeerCertSha256")? {
         let pin = pin.replace(':', "");
-        ensure!(
+        require!(
             pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "Некорректный отпечаток TLS-сертификата"
+            invalid_certificate_fingerprint
         );
     }
     if let Some(value) = stream.get("finalmask") {
@@ -117,12 +114,12 @@ fn validate_hysteria(settings: &Value, stream: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_mask(value: &Value) -> Result<()> {
+fn validate_mask(value: &Value) -> NodeResult<()> {
     let mask = fields(value, &["udp", "quicParams"])?;
     if let Some(udp) = mask.get("udp") {
         let entry = single(udp)?;
         fields(entry, &["type", "settings"])?;
-        ensure!(entry["type"] == "salamander", "Неподдерживаемая UDP-маска");
+        require!(entry["type"] == "salamander", unsupported_udp_mask);
         string(fields(&entry["settings"], &["password"])?, "password")?;
     }
     if let Some(value) = mask.get("quicParams") {
@@ -131,81 +128,80 @@ fn validate_mask(value: &Value) -> Result<()> {
             &["congestion", "brutalUp", "brutalDown", "bbrProfile"],
         )?;
         if let Some(congestion) = optional(quic, "congestion")? {
-            ensure!(congestion == "brutal", "Неподдерживаемый алгоритм QUIC");
+            require!(congestion == "brutal", unsupported_congestion);
         }
         if let Some(profile) = optional(quic, "bbrProfile")? {
-            ensure!(
+            require!(
                 matches!(profile, "standard" | "conservative" | "aggressive"),
-                "Некорректный профиль BBR"
+                invalid_bbr
             );
         }
         for name in ["brutalUp", "brutalDown"] {
             if let Some(speed) = optional(quic, name)? {
                 let speed = bandwidth(speed)?;
-                ensure!(
-                    speed == 0.0 || speed >= 65536.0,
-                    "Скорость Brutal должна быть не меньше 65536 байт/с"
-                );
+                require!(speed == 0.0 || speed >= 65536.0, brutal_minimum);
             }
         }
     }
     Ok(())
 }
 
-fn fields<'a>(value: &'a Value, allowed: &[&str]) -> Result<&'a Map<String, Value>> {
-    let options = value.as_object().context("Ожидается объект Xray")?;
-    ensure!(
+fn fields<'a>(value: &'a Value, allowed: &[&str]) -> NodeResult<&'a Map<String, Value>> {
+    let options = value
+        .as_object()
+        .ok_or_else(|| node_error!(expected_xray_object))?;
+    require!(
         options.keys().all(|key| allowed.contains(&key.as_str())),
-        "Профиль содержит посторонние параметры Xray"
+        unexpected_xray_options
     );
     Ok(options)
 }
 
-fn single(value: &Value) -> Result<&Value> {
+fn single(value: &Value) -> NodeResult<&Value> {
     match value.as_array().map(Vec::as_slice) {
         Some([item]) => Ok(item),
-        _ => bail!("Требуется ровно один элемент конфигурации"),
+        _ => Err(node_error!(expected_one_item)),
     }
 }
 
-fn string<'a>(fields: &'a Map<String, Value>, key: &'static str) -> Result<&'a str> {
+fn string<'a>(fields: &'a Map<String, Value>, key: &'static str) -> NodeResult<&'a str> {
     optional(fields, key)?
         .filter(|text| !text.is_empty())
-        .with_context(|| format!("Отсутствует поле {key}"))
+        .ok_or_else(|| node_error!(missing_field, key))
 }
 
-fn optional<'a>(fields: &'a Map<String, Value>, key: &'static str) -> Result<Option<&'a str>> {
+fn optional<'a>(fields: &'a Map<String, Value>, key: &'static str) -> NodeResult<Option<&'a str>> {
     fields
         .get(key)
         .map(|value| {
             value
                 .as_str()
-                .with_context(|| format!("Ожидается строка в поле {key}"))
+                .ok_or_else(|| node_error!(expected_string, key))
         })
         .transpose()
 }
 
-fn endpoint(value: &Value) -> Result<()> {
+fn endpoint(value: &Value) -> NodeResult<()> {
     host(
         value["address"]
             .as_str()
-            .context("Отсутствует адрес узла")?,
+            .ok_or_else(|| node_error!(missing_node_address))?,
     )?;
-    ensure!(
+    require!(
         value["port"]
             .as_u64()
             .is_some_and(|port| (1..=65535).contains(&port)),
-        "Некорректный порт узла"
+        invalid_node_port
     );
     Ok(())
 }
 
-fn host(value: &str) -> Result<()> {
+fn host(value: &str) -> NodeResult<()> {
     if value.parse::<IpAddr>().is_ok() {
         return Ok(());
     }
     let host = value.strip_suffix('.').unwrap_or(value);
-    ensure!(
+    require!(
         !host.is_empty()
             && host.len() <= 253
             && host.split('.').all(|label| {
@@ -217,7 +213,7 @@ fn host(value: &str) -> Result<()> {
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
             }),
-        "Некорректный адрес сервера или SNI, используйте IP либо DNS-имя в ASCII"
+        invalid_server_name
     );
     Ok(())
 }
@@ -239,7 +235,7 @@ fn base64_url_bytes(value: &str, size: usize) -> bool {
     last & ((1 << unused_bits) - 1) == 0
 }
 
-fn bandwidth(value: &str) -> Result<f64> {
+fn bandwidth(value: &str) -> NodeResult<f64> {
     let value = value.trim().to_ascii_lowercase();
     if value.is_empty() {
         return Ok(0.0);
@@ -249,24 +245,24 @@ fn bandwidth(value: &str) -> Result<f64> {
         .unwrap_or(value.len());
     let number: f64 = value[..end]
         .parse()
-        .map_err(|_| anyhow::anyhow!("Некорректная скорость QUIC"))?;
+        .map_err(|_| node_error!(invalid_quic_rate))?;
     let factor = match value[end..].trim() {
         "" | "b" | "bps" => 1.0,
         "k" | "kb" | "kbps" => 1024.0,
         "m" | "mb" | "mbps" => 1024.0 * 1024.0,
         "g" | "gb" | "gbps" => 1024.0 * 1024.0 * 1024.0,
         "t" | "tb" | "tbps" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
-        _ => bail!("Неизвестная единица скорости QUIC"),
+        _ => return Err(node_error!(unknown_quic_unit)),
     };
     let speed = number * factor / 8.0;
-    ensure!(
+    require!(
         speed.is_finite() && speed >= 0.0 && speed <= u64::MAX as f64,
-        "Некорректная скорость QUIC"
+        invalid_quic_rate
     );
     Ok(speed)
 }
 
-fn validate_fingerprint(value: &str) -> Result<()> {
+fn validate_fingerprint(value: &str) -> NodeResult<()> {
     const FINGERPRINTS: &[&str] = &[
         "",
         "chrome",
@@ -332,9 +328,6 @@ fn validate_fingerprint(value: &str) -> Result<()> {
         "hellochrome_120_pq",
     ];
     let value = value.to_ascii_lowercase();
-    ensure!(
-        FINGERPRINTS.contains(&value.as_str()),
-        "Неизвестный или неподдерживаемый fingerprint для Xray 26.7.28"
-    );
+    require!(FINGERPRINTS.contains(&value.as_str()), unknown_fingerprint);
     Ok(())
 }

@@ -1,11 +1,11 @@
-use crate::{profile::validate_outbound, subscription::Node};
+use crate::{profile::validate_outbound, runtime_text::message, subscription::Node};
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
 pub fn private_config(node: &Node, http_port: u16, socks_port: u16) -> Result<Value> {
     ensure!(
         http_port != 0 && socks_port != 0 && http_port != socks_port,
-        "Требуются два разных локальных порта"
+        message!(distinct_local_ports)
     );
     validate_outbound(&node.outbound)?;
     let mut outbound = node.outbound.clone();

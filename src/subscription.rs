@@ -1,5 +1,7 @@
+use crate::i18n::Language;
 use crate::profile::validate_outbound;
-use anyhow::{Context, Result, bail, ensure};
+use crate::runtime_text::{self, NodeError, NodeResult, message, node_error, require};
+use anyhow::{Context, Result, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -16,17 +18,37 @@ pub struct Node {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub nodes: Vec<Node>,
-    pub skipped: Vec<String>,
+    pub skipped: Vec<SkippedNode>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SkippedNode {
+    Entry { index: usize, reason: NodeError },
+    Legacy(String),
+}
+
+impl SkippedNode {
+    pub fn text(&self, language: Language) -> String {
+        match self {
+            Self::Entry { index, reason } => match language {
+                Language::En => format!(runtime_text::en::text!(skipped_node), index, reason.en),
+                Language::Ru => format!(runtime_text::ru::text!(skipped_node), index, reason.ru),
+            },
+            Self::Legacy(text) => text.clone(),
+        }
+    }
 }
 
 pub fn fetch(address: &str) -> Result<Subscription> {
-    let url = Url::parse(address).map_err(|_| anyhow::anyhow!("Некорректный URL подписки"))?;
+    let url =
+        Url::parse(address).map_err(|_| anyhow::anyhow!(message!(invalid_subscription_url)))?;
     ensure!(
         matches!(url.scheme(), "https" | "http")
             && url.has_host()
             && url.username().is_empty()
             && url.password().is_none(),
-        "Для подписки требуется HTTP(S) URL без логина и пароля"
+        message!(subscription_url_credentials)
     );
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
@@ -48,25 +70,24 @@ pub fn fetch(address: &str) -> Result<Subscription> {
             }
         }))
         .build()
-        .context("Не удалось создать клиент подписки")?;
+        .context(message!(create_subscription_client))?;
     let response = client
         .get(url)
         .send()
-        .map_err(|_| anyhow::anyhow!("Не удалось загрузить подписку"))?;
+        .map_err(|_| anyhow::anyhow!(message!(download_subscription)))?;
     ensure!(
         response.status().is_success(),
-        "Подписка вернула HTTP {}",
-        response.status().as_u16()
+        message!(subscription_status, response.status().as_u16())
     );
     ensure!(
         response.content_length().unwrap_or(0) <= MAX_BYTES as u64,
-        "Подписка превышает 4 МиБ"
+        message!(subscription_size)
     );
     let mut bytes = Vec::new();
     response
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("Не удалось прочитать подписку"))?;
+        .map_err(|_| anyhow::anyhow!(message!(read_subscription)))?;
     parse(&bytes)
 }
 
@@ -75,12 +96,12 @@ pub fn parse(bytes: &[u8]) -> Result<Subscription> {
     struct Document {
         proxies: Vec<Value>,
     }
-    ensure!(bytes.len() <= MAX_BYTES, "Подписка превышает 4 МиБ");
+    ensure!(bytes.len() <= MAX_BYTES, message!(subscription_size));
     let document: Document = serde_yaml_ng::from_slice(bytes)
-        .map_err(|_| anyhow::anyhow!("Подписка должна содержать Mihomo YAML со списком proxies"))?;
+        .map_err(|_| anyhow::anyhow!(message!(subscription_format)))?;
     ensure!(
         document.proxies.len() <= 512,
-        "Подписка содержит больше 512 узлов"
+        message!(subscription_node_limit)
     );
     let mut result = Subscription {
         nodes: Vec::new(),
@@ -89,36 +110,41 @@ pub fn parse(bytes: &[u8]) -> Result<Subscription> {
     let mut names = HashSet::new();
     for (index, value) in document.proxies.into_iter().enumerate() {
         let parsed = convert(&value).and_then(|node| {
-            ensure!(names.insert(node.name.clone()), "Имя узла повторяется");
+            require!(names.insert(node.name.clone()), duplicate_node);
             Ok(node)
         });
         match parsed {
             Ok(node) => result.nodes.push(node),
-            Err(reason) => result.skipped.push(format!("Узел {}. {reason}", index + 1)),
+            Err(reason) => result.skipped.push(SkippedNode::Entry {
+                index: index + 1,
+                reason,
+            }),
         }
     }
     Ok(result)
 }
 
-fn convert(value: &Value) -> Result<Node> {
-    let fields = value.as_object().context("Некорректная запись в proxies")?;
+fn convert(value: &Value) -> NodeResult<Node> {
+    let fields = value
+        .as_object()
+        .ok_or_else(|| node_error!(invalid_entry))?;
     let name = text(fields, "name")?;
-    ensure!(
+    require!(
         !name.trim().is_empty()
             && name.chars().count() <= 150
             && !name.chars().any(|character| character.is_control()
                 || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')),
-        "Недопустимое имя узла"
+        invalid_node_name
     );
     let server = text(fields, "server")?;
     let port = value["port"]
         .as_u64()
         .or_else(|| value["port"].as_str()?.parse().ok())
-        .context("Некорректный порт узла")?;
+        .ok_or_else(|| node_error!(invalid_node_port))?;
     let outbound = match text(fields, "type")? {
         "vless" => vless(fields, server, port)?,
         "hysteria2" | "hy2" => hysteria(fields, server, port)?,
-        _ => bail!("Тип прокси не поддерживается в версии 0.1"),
+        _ => return Err(node_error!(unsupported_proxy_type)),
     };
     validate_outbound(&outbound)?;
     Ok(Node {
@@ -127,15 +153,15 @@ fn convert(value: &Value) -> Result<Node> {
     })
 }
 
-fn text<'a>(fields: &'a Map<String, Value>, key: &'static str) -> Result<&'a str> {
+fn text<'a>(fields: &'a Map<String, Value>, key: &'static str) -> NodeResult<&'a str> {
     fields
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .with_context(|| format!("Требуется строковое поле {key}"))
+        .ok_or_else(|| node_error!(required_string, key))
 }
 
-fn known(fields: &Map<String, Value>, extra: &[&str]) -> Result<()> {
+fn known(fields: &Map<String, Value>, extra: &[&str]) -> NodeResult<()> {
     let common = [
         "name",
         "type",
@@ -147,28 +173,29 @@ fn known(fields: &Map<String, Value>, extra: &[&str]) -> Result<()> {
         "skip-cert-verify",
         "smux",
     ];
-    ensure!(
+    require!(
         fields
             .keys()
             .all(|key| common.contains(&key.as_str()) || extra.contains(&key.as_str())),
-        "Профиль содержит неподдерживаемые параметры Mihomo"
+        unsupported_mihomo_fields
     );
     for key in ["tfo", "mptcp", "skip-cert-verify"] {
-        ensure!(
+        require!(
             fields.get(key).is_none_or(|value| value == false),
-            "Параметр {key} не поддерживается"
+            unsupported_option,
+            key
         );
     }
     if let Some(smux) = fields.get("smux") {
-        ensure!(
+        require!(
             smux.is_object() && smux["enabled"] == false,
-            "Мультиплексирование smux не поддерживается"
+            unsupported_smux
         );
     }
     Ok(())
 }
 
-fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Value> {
+fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Value> {
     known(
         fields,
         &[
@@ -183,30 +210,30 @@ fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Value> 
             "packet-encoding",
         ],
     )?;
-    ensure!(
+    require!(
         fields.get("tls").is_some_and(|value| value == true),
-        "Требуется VLESS с REALITY"
+        require_vless_reality
     );
-    ensure!(
+    require!(
         fields
             .get("network")
             .is_none_or(|value| value == "tcp" || value == "raw"),
-        "Поддерживается только VLESS RAW/TCP"
+        require_vless_tcp
     );
-    ensure!(
+    require!(
         fields
             .get("encryption")
             .is_none_or(|value| value == "" || value == "none"),
-        "Неподдерживаемое шифрование VLESS"
+        unsupported_encryption
     );
     let limits = fields
         .get("reality-opts")
         .and_then(Value::as_object)
-        .context("Требуется reality-opts")?;
-    ensure!(limits.keys().all(|key| ["public-key","short-id","support-x25519mlkem768"].contains(&key.as_str())), "Неподдерживаемые параметры REALITY");
-    ensure!(
+        .ok_or_else(|| node_error!(require_reality_opts))?;
+    require!(limits.keys().all(|key| ["public-key","short-id","support-x25519mlkem768"].contains(&key.as_str())), unsupported_reality_options);
+    require!(
         limits.get("support-x25519mlkem768").is_none(),
-        "Явный выбор группы обмена ключами REALITY не поддерживается"
+        unsupported_reality_group
     );
     let mut reality = json!({"publicKey": text(limits,"public-key")?, "serverName": fields.get("servername").map_or(json!(server), Value::clone)});
     if let Some(value) = limits.get("short-id") {
@@ -222,7 +249,7 @@ fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Value> 
     }))
 }
 
-fn hysteria(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Value> {
+fn hysteria(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Value> {
     known(
         fields,
         &[
@@ -251,16 +278,13 @@ fn hysteria(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Valu
     if let Some(value) = fields.get("obfs")
         && value != ""
     {
-        ensure!(
-            value == "salamander",
-            "Неподдерживаемая обфускация Hysteria2"
-        );
+        require!(value == "salamander", unsupported_obfuscation);
         stream["finalmask"]["udp"] =
             json!([{"type":"salamander","settings":{"password":text(fields, "obfs-password")?}}]);
     } else {
-        ensure!(
+        require!(
             !fields.contains_key("obfs-password"),
-            "Пароль обфускации указан без её типа"
+            missing_obfuscation_type
         );
     }
     for (source, target) in [("up", "brutalUp"), ("down", "brutalDown")] {
@@ -268,7 +292,7 @@ fn hysteria(fields: &Map<String, Value>, server: &str, port: u64) -> Result<Valu
             let speed = match value {
                 Value::String(text) => text.clone(),
                 Value::Number(number) => number.to_string(),
-                _ => bail!("Некорректная скорость Hysteria2"),
+                _ => return Err(node_error!(invalid_hysteria_rate)),
             };
             let speed = speed.trim();
             let speed = if speed.parse::<f64>().is_ok() {
@@ -318,6 +342,29 @@ rules: [MATCH,DIRECT]
     }
 
     #[test]
+    fn saved_skip_reasons_follow_the_display_language() -> Result<()> {
+        use crate::storage::{Paths, State};
+
+        let subscription = parse(b"proxies: [{name: hidden, type: direct, port: 123}]")?;
+        let mut snapshot: State = serde_json::from_value(json!({"skipped": ["legacy detail"]}))?;
+        snapshot.skipped.extend(subscription.skipped);
+        let directory = tempfile::tempdir()?;
+        let paths = Paths::resolve(Some(directory.path().into()))?;
+        paths.save_state(&mut snapshot)?;
+        let saved = paths.read_snapshot()?.skipped;
+        assert_eq!(saved[0].text(Language::En), "legacy detail");
+        assert_eq!(
+            saved[1].text(Language::En),
+            "Node 1. The server field must contain a string"
+        );
+        assert_eq!(
+            saved[1].text(Language::Ru),
+            "Узел 1. Требуется строковое поле server"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn incompatible_nodes_and_malformed_yaml_do_not_disclose_values() {
         for extra in [
             "skip-cert-verify: true",
@@ -332,7 +379,11 @@ rules: [MATCH,DIRECT]
             let result = parse(bytes.as_bytes()).unwrap();
             assert!(result.nodes.is_empty());
             assert_eq!(result.skipped.len(), 1);
-            assert!(!result.skipped[0].contains("secret"));
+            assert!(
+                !serde_json::to_string(&result.skipped)
+                    .unwrap()
+                    .contains("secret")
+            );
         }
         assert!(parse(b"proxies: []").unwrap().nodes.is_empty());
         let error = parse(b"proxies: [{{secret").err().unwrap().to_string();

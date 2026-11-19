@@ -6,33 +6,64 @@ use dialoguer::{Input, MultiSelect, Password, Select, theme::ColorfulTheme};
 use reqwest::Url;
 
 use crate::{
+    i18n::Language,
     notifications::{Alert, event_label, timestamp},
     storage::{PRESETS, Paths, Settings, Smtp, State, Telegram},
 };
 
+include!("../locales/en/tui.rs");
+include!("../locales/ru/tui.rs");
+
+macro_rules! tui {
+    ($language:expr, $message:ident) => {
+        match $language {
+            Language::En => tui_en!($message),
+            Language::Ru => tui_ru!($message),
+        }
+    };
+    ($language:expr, $message:ident, $($args:expr),+ $(,)?) => {
+        match $language {
+            Language::En => format!(tui_en!($message), $($args),+),
+            Language::Ru => format!(tui_ru!($message), $($args),+),
+        }
+    };
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     let terminal = Term::stderr();
-    ensure!(terminal.is_term(), "Для меню нужен интерактивный терминал");
-    let ui = Interface {
+    let mut ui = Interface {
+        language: if paths.has_settings() {
+            paths.load_settings()?.language
+        } else {
+            Language::default()
+        },
         terminal,
         theme: ColorfulTheme::default(),
     };
-    if !paths.has_settings() && !ui.setup(paths)? {
-        return Ok(());
+    ensure!(ui.terminal.is_term(), tui!(ui.language, terminal_required));
+    if !paths.has_settings() {
+        let Some(language) = ui.choose_language()? else {
+            return Ok(());
+        };
+        ui.set_language(language);
+        if !ui.setup(paths)? {
+            return Ok(());
+        }
     }
     loop {
-        ui.screen("Proxywatch")?;
         let settings = paths.load_settings()?;
+        ui.set_language(settings.language);
+        ui.screen("Proxywatch")?;
         let state = paths.load_state()?;
         ui.status(&settings, &state)?;
         match ui.select(
-            "Действие",
+            tui!(ui.language, action),
             &[
-                "Обновить",
-                "Узлы",
-                "История событий",
-                "Настройки",
-                "Закрыть меню",
+                tui!(ui.language, refresh),
+                tui!(ui.language, nodes),
+                tui!(ui.language, history),
+                tui!(ui.language, settings),
+                tui!(ui.language, close),
             ],
             0,
         )? {
@@ -48,11 +79,33 @@ pub fn run(paths: &Paths) -> Result<()> {
 }
 
 struct Interface {
+    language: Language,
     terminal: Term,
     theme: ColorfulTheme,
 }
 
 impl Interface {
+    fn set_language(&mut self, language: Language) {
+        self.language = language;
+        crate::i18n::set_language(language);
+    }
+
+    fn choose_language(&self) -> Result<Option<Language>> {
+        Ok(self
+            .select(
+                tui!(self.language, language_choice),
+                &[tui!(self.language, english), tui!(self.language, russian)],
+                usize::from(self.language == Language::Ru),
+            )?
+            .map(|index| {
+                if index == 0 {
+                    Language::En
+                } else {
+                    Language::Ru
+                }
+            }))
+    }
+
     fn line(&self, text: &str) -> Result<()> {
         Ok(self.terminal.write_line(text)?)
     }
@@ -82,7 +135,11 @@ impl Interface {
     }
 
     fn confirm(&self, title: &str, default: bool) -> Result<bool> {
-        Ok(self.select(title, &["Да", "Нет"], usize::from(!default))? == Some(0))
+        Ok(self.select(
+            title,
+            &[tui!(self.language, yes), tui!(self.language, no)],
+            usize::from(!default),
+        )? == Some(0))
     }
 
     fn text(&self, title: &str, current: &str, optional: bool) -> Result<String> {
@@ -99,7 +156,7 @@ impl Interface {
         let prompt = if current.is_empty() {
             title.to_owned()
         } else {
-            format!("{title} (Enter сохраняет прежнее значение)")
+            tui!(self.language, keep_secret, title)
         };
         let input = Password::with_theme(&self.theme)
             .with_prompt(prompt)
@@ -113,88 +170,96 @@ impl Interface {
     }
 
     fn positive(&self, title: &str, current: u64, maximum: u64) -> Result<u64> {
-        Ok(Input::<u64>::with_theme(&self.theme)
+        let error = || tui!(self.language, number_range, maximum);
+        let input = Input::<String>::with_theme(&self.theme)
             .with_prompt(title)
-            .default(current)
-            .validate_with(|value: &u64| {
-                (1..=maximum)
-                    .contains(value)
-                    .then_some(())
-                    .ok_or_else(|| format!("Введите число от 1 до {maximum}"))
+            .default(current.to_string())
+            .validate_with(|text: &String| {
+                text.parse::<u64>()
+                    .ok()
+                    .filter(|value| (1..=maximum).contains(value))
+                    .map(|_| ())
+                    .ok_or_else(error)
             })
-            .interact_text_on(&self.terminal)?)
+            .interact_text_on(&self.terminal)?;
+        input.parse().map_err(|_| anyhow::anyhow!(error()))
     }
 
     fn pause(&self) -> Result<()> {
-        self.line("\nНажмите Enter, чтобы вернуться в меню.")?;
+        self.line(tui!(self.language, pause))?;
         self.terminal.read_line()?;
         Ok(())
     }
 
-    fn setup(&self, paths: &Paths) -> Result<bool> {
-        self.screen("Proxywatch · Первая настройка")?;
+    fn setup(&mut self, paths: &Paths) -> Result<bool> {
+        self.screen(tui!(self.language, first_setup))?;
         let mut settings = Settings {
-            subscription_url: self.secret("Ссылка на подписку Mihomo YAML", "")?,
+            language: self.language,
+            subscription_url: self.secret(tui!(self.language, subscription_url), "")?,
             ..Settings::default()
         };
         self.identity(&mut settings)?;
         if !self.ports(&mut settings)? || !self.checks(&mut settings)? {
             return Ok(false);
         }
-        self.line("Telegram доставляет события через рабочий выход. Для письма при потере всех узлов настройте SMTP.")?;
+        self.line(tui!(self.language, notification_intro))?;
         self.notifications(&mut settings)?;
         self.edit(paths, settings)
     }
 
-    fn edit(&self, paths: &Paths, mut settings: Settings) -> Result<bool> {
+    fn edit(&mut self, paths: &Paths, mut settings: Settings) -> Result<bool> {
         loop {
-            self.screen("Proxywatch · Настройки")?;
+            self.screen(tui!(self.language, settings_title))?;
             self.line(&display_text(&settings.instance_name))?;
             self.line(&ports_label(&settings))?;
-            self.line(&format!(
-                "Проверка {} · каждые {} с · порог {}",
-                target_label(&settings.check_url),
+            self.line(&tui!(
+                self.language,
+                check_summary,
+                target_label(self.language, &settings.check_url),
                 settings.interval_seconds,
                 settings.failure_threshold
             ))?;
             self.line(&format!(
                 "Telegram {} · SMTP {}\n",
-                enabled(settings.telegram.is_some()),
-                enabled(settings.smtp.is_some())
+                enabled(self.language, settings.telegram.is_some()),
+                enabled(self.language, settings.smtp.is_some())
             ))?;
             match self.select(
-                "Настройки",
+                tui!(self.language, settings),
                 &[
-                    "Сохранить",
-                    "Подписка",
-                    "Локальные порты",
-                    "Проверки и интервалы",
-                    "Уведомления",
-                    "Путь к Xray",
-                    "Имя и назначение установки",
-                    "Выйти без сохранения",
+                    tui!(self.language, save),
+                    tui!(self.language, subscription),
+                    tui!(self.language, local_ports),
+                    tui!(self.language, checks),
+                    tui!(self.language, notifications),
+                    tui!(self.language, xray_path),
+                    tui!(self.language, identity),
+                    tui!(self.language, language_choice),
+                    tui!(self.language, discard),
                 ],
                 0,
             )? {
                 Some(0) => {
                     if let Err(error) = settings.validate() {
-                        self.line(&format!("Проверьте настройки. {error}"))?;
+                        self.line(&tui!(self.language, invalid_settings, error))?;
                         self.pause()?;
                         continue;
                     }
                     let existing = paths.has_settings();
                     paths.save_settings(&settings)?;
                     self.line(if existing {
-                        "Настройки сохранены. Чтобы применить их к работающему сервису, перезапустите его. В systemd используйте systemctl --user restart proxywatch."
+                        tui!(self.language, saved_existing)
                     } else {
-                        "Настройки сохранены. Запустите сервис командой proxywatch run или используйте systemctl --user enable --now proxywatch после установки unit-файла."
+                        tui!(self.language, saved_new)
                     })?;
                     self.pause()?;
                     return Ok(true);
                 }
                 Some(1) => {
-                    settings.subscription_url =
-                        self.secret("Ссылка на подписку Mihomo YAML", &settings.subscription_url)?
+                    settings.subscription_url = self.secret(
+                        tui!(self.language, subscription_url),
+                        &settings.subscription_url,
+                    )?
                 }
                 Some(2) => {
                     self.ports(&mut settings)?;
@@ -205,21 +270,31 @@ impl Interface {
                 Some(4) => self.notifications(&mut settings)?,
                 Some(5) => {
                     settings.xray_binary = self.text(
-                        "Путь или имя исполняемого файла Xray",
+                        tui!(self.language, xray_binary),
                         &settings.xray_binary,
                         false,
                     )?
                 }
                 Some(6) => self.identity(&mut settings)?,
+                Some(7) => {
+                    if let Some(language) = self.choose_language()? {
+                        self.set_language(language);
+                        settings.language = language;
+                    }
+                }
                 _ => return Ok(false),
             }
         }
     }
 
     fn identity(&self, settings: &mut Settings) -> Result<()> {
-        settings.instance_name = self.text("Имя установки", &settings.instance_name, false)?;
+        settings.instance_name = self.text(
+            tui!(self.language, instance_name),
+            &settings.instance_name,
+            false,
+        )?;
         settings.instance_description = self.text(
-            "Назначение (необязательно)",
+            tui!(self.language, instance_description),
             &settings.instance_description,
             true,
         )?;
@@ -233,11 +308,11 @@ impl Interface {
             _ => 0,
         };
         let Some(mode) = self.select(
-            "Локальные входы на 127.0.0.1",
+            tui!(self.language, inputs),
             &[
-                "SOCKS5 и HTTP на отдельных портах",
-                "Только SOCKS5",
-                "Только HTTP",
+                tui!(self.language, both_inputs),
+                tui!(self.language, socks_only),
+                tui!(self.language, http_only),
             ],
             default,
         )?
@@ -246,7 +321,7 @@ impl Interface {
         };
         let socks = if mode != 2 {
             Some(self.positive(
-                "Порт SOCKS5",
+                tui!(self.language, socks_port),
                 u64::from(settings.socks_port.unwrap_or(10808)),
                 u16::MAX.into(),
             )? as u16)
@@ -256,14 +331,14 @@ impl Interface {
         let http = if mode != 1 {
             loop {
                 let port = self.positive(
-                    "Порт HTTP",
+                    tui!(self.language, http_port),
                     u64::from(settings.http_port.unwrap_or(10809)),
                     u16::MAX.into(),
                 )? as u16;
                 if Some(port) != socks {
                     break Some(port);
                 }
-                self.line("Этот порт уже выбран для SOCKS5. Выберите другой порт для HTTP.")?;
+                self.line(tui!(self.language, port_conflict))?;
             }
         } else {
             None
@@ -275,49 +350,44 @@ impl Interface {
 
     fn checks(&self, settings: &mut Settings) -> Result<bool> {
         let mut choices: Vec<_> = PRESETS.iter().map(|(label, _)| *label).collect();
-        choices.push("Свой URL");
+        choices.push(tui!(self.language, custom_url));
         let default = PRESETS
             .iter()
             .position(|(_, url)| *url == settings.check_url)
             .unwrap_or(PRESETS.len());
-        let Some(index) = self.select(
-            "От доступности какого сервиса зависит переключение?",
-            &choices,
-            default,
-        )?
+        let Some(index) = self.select(tui!(self.language, choose_target), &choices, default)?
         else {
             return Ok(false);
         };
         let selected = if index < PRESETS.len() {
             PRESETS[index].1.to_owned()
         } else {
-            self.secret("URL контрольного запроса", &settings.check_url)?
+            self.secret(tui!(self.language, check_url), &settings.check_url)?
         };
         let period = self.positive(
-            "Проверка активного узла, с",
+            tui!(self.language, active_interval),
             settings.interval_seconds,
             86400,
         )?;
         let reserve_period = self.positive(
-            "Проверка резервных узлов, с",
+            tui!(self.language, reserve_interval),
             settings.reserve_interval_seconds,
             86400,
         )?;
         let threshold = self.positive(
-            "Ошибок подряд до переключения",
+            tui!(self.language, failure_threshold),
             settings.failure_threshold.into(),
             100,
         )? as u32;
-        let timeout = self.positive("Тайм-аут запроса, с", settings.timeout_seconds, 300)?;
+        let timeout = self.positive(tui!(self.language, timeout), settings.timeout_seconds, 300)?;
         let refresh = self.positive(
-            "Интервал обновления подписки, с",
+            tui!(self.language, refresh_interval),
             settings.refresh_seconds,
             2_592_000,
         )?;
         let mut diagnostics = settings.diagnostic_urls.clone();
         diagnostics.retain(|url| url != &selected);
-        if self.confirm("Выбрать дополнительные диагностические проверки?", false)?
-        {
+        if self.confirm(tui!(self.language, choose_diagnostics), false)? {
             let mut options: Vec<String> = PRESETS
                 .iter()
                 .map(|(_, url)| (*url).to_owned())
@@ -328,16 +398,17 @@ impl Interface {
                     options.push(url.clone())
                 }
             }
-            let names: Vec<_> = options.iter().map(|url| target_label(url)).collect();
+            let names: Vec<_> = options
+                .iter()
+                .map(|url| target_label(self.language, url))
+                .collect();
             let defaults: Vec<_> = options
                 .iter()
                 .map(|url| diagnostics.contains(url))
                 .collect();
-            self.line(
-                "Пробел отмечает сервис, Enter сохраняет выбор. Эти результаты видны в статусе.",
-            )?;
+            self.line(tui!(self.language, diagnostics_hint))?;
             let Some(indices) = MultiSelect::with_theme(&self.theme)
-                .with_prompt("Диагностические проверки")
+                .with_prompt(tui!(self.language, diagnostics))
                 .items(&names)
                 .defaults(&defaults)
                 .interact_on_opt(&self.terminal)?
@@ -349,9 +420,9 @@ impl Interface {
                 .map(|index| options[index].clone())
                 .collect();
             while diagnostics.len() < 16
-                && self.confirm("Добавить свой диагностический URL?", false)?
+                && self.confirm(tui!(self.language, add_diagnostic), false)?
             {
-                let url = self.secret("Диагностический URL", "")?;
+                let url = self.secret(tui!(self.language, diagnostic_url), "")?;
                 if url != selected && !diagnostics.contains(&url) {
                     diagnostics.push(url)
                 }
@@ -368,10 +439,13 @@ impl Interface {
     }
 
     fn notifications(&self, settings: &mut Settings) -> Result<()> {
-        let choices = ["Telegram через активный узел", "Почта через SMTP напрямую"];
-        self.line("Пробел отмечает канал, Enter подтверждает выбор.")?;
+        let choices = [
+            tui!(self.language, telegram_route),
+            tui!(self.language, smtp_route),
+        ];
+        self.line(tui!(self.language, channel_hint))?;
         let Some(selected) = MultiSelect::with_theme(&self.theme)
-            .with_prompt("Каналы уведомлений")
+            .with_prompt(tui!(self.language, channels))
             .items(choices)
             .defaults(&[settings.telegram.is_some(), settings.smtp.is_some()])
             .interact_on_opt(&self.terminal)?
@@ -382,11 +456,11 @@ impl Interface {
             let existing = settings.telegram.as_ref();
             Some(Telegram {
                 token: self.secret(
-                    "Токен бота Telegram",
+                    tui!(self.language, telegram_token),
                     existing.map_or("", |t| t.token.as_str()),
                 )?,
                 chat_id: self.text(
-                    "ID чата Telegram",
+                    tui!(self.language, telegram_chat_id),
                     existing.map_or("", |t| t.chat_id.as_str()),
                     false,
                 )?,
@@ -397,24 +471,27 @@ impl Interface {
         let smtp = if selected.contains(&1) {
             let existing = settings.smtp.as_ref();
             let host = self.text(
-                "Сервер SMTP",
+                tui!(self.language, smtp_host),
                 existing.map_or("", |s| s.host.as_str()),
                 false,
             )?;
             let port = self.positive(
-                "Порт SMTP",
+                tui!(self.language, smtp_port),
                 existing.map_or(465, |s| u64::from(s.port)),
                 u16::MAX.into(),
             )? as u16;
             let username = self.text(
-                "Имя пользователя SMTP (можно оставить пустым)",
+                tui!(self.language, smtp_username),
                 existing.map_or("", |s| s.username.as_str()),
                 true,
             )?;
             let password = if username.is_empty() {
                 String::new()
             } else {
-                self.secret("Пароль SMTP", existing.map_or("", |s| s.password.as_str()))?
+                self.secret(
+                    tui!(self.language, smtp_password),
+                    existing.map_or("", |s| s.password.as_str()),
+                )?
             };
             Some(Smtp {
                 host,
@@ -422,12 +499,12 @@ impl Interface {
                 username,
                 password,
                 from: self.text(
-                    "Адрес отправителя",
+                    tui!(self.language, sender),
                     existing.map_or("", |s| s.from.as_str()),
                     false,
                 )?,
                 to: self.text(
-                    "Адрес получателя",
+                    tui!(self.language, recipient),
                     existing.map_or("", |s| s.to.as_str()),
                     false,
                 )?,
@@ -444,24 +521,26 @@ impl Interface {
         self.line(&display_text(&settings.instance_name))?;
         self.line(&ports_label(settings))?;
         if state.updated_at == 0 {
-            self.line("Сервис ещё не записал состояние.")?;
+            self.line(tui!(self.language, no_state))?;
             return Ok(());
         }
         let status = match state.status.as_str() {
-            "starting" => "запускается",
-            "healthy" => "работает",
-            "degraded" => "ошибки проверки",
-            "outage" => "все узлы недоступны",
-            "stopped" => "остановлен",
-            _ => "неизвестно",
+            "starting" => tui!(self.language, starting),
+            "healthy" => tui!(self.language, healthy),
+            "degraded" => tui!(self.language, degraded),
+            "outage" => tui!(self.language, outage),
+            "stopped" => tui!(self.language, stopped),
+            _ => tui!(self.language, unknown),
         };
-        self.line(&format!(
-            "Состояние · {} · {}",
+        self.line(&tui!(
+            self.language,
+            service_status,
             status,
-            elapsed_label(now(), state.updated_at)
+            elapsed_label(self.language, now(), state.updated_at)
         ))?;
-        self.line(&format!(
-            "Доступно узлов: {} из {}",
+        self.line(&tui!(
+            self.language,
+            node_count,
             state
                 .nodes
                 .values()
@@ -470,38 +549,54 @@ impl Interface {
             state.nodes.len()
         ))?;
         if let Some(preferred) = state.preferred.as_deref() {
-            self.line(&format!("Приоритет: {}", display_text(preferred)))?;
+            self.line(&tui!(
+                self.language,
+                preferred_node,
+                display_text(preferred)
+            ))?;
         }
-        self.line(&format!(
-            "Активный узел · {}",
+        self.line(&tui!(
+            self.language,
+            active_node,
             state
                 .active
                 .as_deref()
                 .map(display_text)
-                .unwrap_or_else(|| "отсутствует".into())
+                .unwrap_or_else(|| tui!(self.language, no_active).into())
         ))?;
-        self.line(&format!(
-            "Проверка · {} · {}",
-            target_label(&settings.check_url),
-            state.last_probe.map_or("ожидается", probe_label)
+        self.line(&tui!(
+            self.language,
+            check_result,
+            target_label(self.language, &settings.check_url),
+            state
+                .last_probe
+                .map_or(tui!(self.language, pending), |passed| probe_label(
+                    self.language,
+                    passed
+                ))
         ))?;
         for (target, passed) in &state.diagnostics {
-            self.line(&format!(
-                "Диагностика · {} · {}",
-                target_label(target),
-                probe_label(*passed)
+            self.line(&tui!(
+                self.language,
+                diagnostic_result,
+                target_label(self.language, target),
+                probe_label(self.language, *passed)
             ))?;
         }
         for reason in &state.skipped {
-            self.line(&format!("Пропущено · {}", display_text(reason)))?;
+            self.line(&tui!(
+                self.language,
+                skipped_entry,
+                display_text(&reason.text(self.language))
+            ))?;
         }
         Ok(())
     }
 
     fn nodes(&self, state: &State) -> Result<()> {
         if state.nodes.is_empty() {
-            self.screen("Узлы")?;
-            self.line("Результатов проверки пока нет.")?;
+            self.screen(tui!(self.language, nodes))?;
+            self.line(tui!(self.language, no_probes))?;
             return self.pause();
         }
         let entries: Vec<_> = state.nodes.iter().collect();
@@ -516,12 +611,13 @@ impl Interface {
                 format!("{indicator} {}", display_text(name))
             })
             .collect();
-        choices.push("Назад".into());
+        choices.push(tui!(self.language, back).into());
         let mut selected = 0;
         loop {
-            self.screen("Узлы")?;
-            self.line("+ доступен  − недоступен  ? не проверен")?;
-            let Some(index) = self.select("Выберите узел", &choices, selected)? else {
+            self.screen(tui!(self.language, nodes))?;
+            self.line(tui!(self.language, node_legend))?;
+            let Some(index) = self.select(tui!(self.language, choose_node), &choices, selected)?
+            else {
                 return Ok(());
             };
             if index == entries.len() {
@@ -531,34 +627,42 @@ impl Interface {
             let (name, health) = entries[index];
             self.screen(&display_text(name))?;
             let status = match health.available {
-                Some(true) => "доступен",
-                Some(false) => "недоступен",
-                None => "ожидает проверки",
+                Some(true) => tui!(self.language, available),
+                Some(false) => tui!(self.language, unavailable),
+                None => tui!(self.language, unchecked),
             };
-            self.line(&format!("Состояние: {status}"))?;
+            self.line(&tui!(self.language, node_status, status))?;
             if state.active.as_ref() == Some(name) {
-                self.line("Сейчас передаёт трафик")?;
+                self.line(tui!(self.language, active_route))?;
             }
             if state.preferred.as_ref() == Some(name) {
-                self.line("Приоритетный выход")?;
+                self.line(tui!(self.language, preferred_route))?;
             }
             if health.since != 0 {
-                self.line(&format!("Состояние с {}", timestamp(health.since)))?;
+                self.line(&tui!(
+                    self.language,
+                    state_since,
+                    timestamp(self.language, health.since)
+                ))?;
             }
             if health.checked_at != 0 {
-                self.line(&format!("Проверка: {}", timestamp(health.checked_at)))?;
+                self.line(&tui!(
+                    self.language,
+                    last_checked,
+                    timestamp(self.language, health.checked_at)
+                ))?;
             }
             if let Some(latency) = health.latency_ms {
-                self.line(&format!("Отклик: {latency} мс"))?;
+                self.line(&tui!(self.language, latency, latency))?;
             }
             self.pause()?;
         }
     }
 
     fn history(&self, settings: &Settings, state: &State) -> Result<()> {
-        self.screen("История событий")?;
+        self.screen(tui!(self.language, history))?;
         if state.history.is_empty() {
-            self.line("Событий пока нет.")?;
+            self.line(tui!(self.language, no_events))?;
         } else {
             let events: Vec<_> = state.history.iter().rev().collect();
             let time = now();
@@ -567,16 +671,18 @@ impl Interface {
                 .map(|event| {
                     format!(
                         "{} · {}",
-                        event_label(&event.kind).unwrap_or("Событие"),
-                        elapsed_label(time, event.at)
+                        event_label(self.language, &event.kind)
+                            .unwrap_or(tui!(self.language, event)),
+                        elapsed_label(self.language, time, event.at)
                     )
                 })
                 .collect();
-            labels.push("Назад".into());
+            labels.push(tui!(self.language, back).into());
             let mut selected = 0;
             loop {
-                self.screen("История событий")?;
-                let Some(index) = self.select("Выберите событие", &labels, selected)?
+                self.screen(tui!(self.language, history))?;
+                let Some(index) =
+                    self.select(tui!(self.language, choose_event), &labels, selected)?
                 else {
                     return Ok(());
                 };
@@ -585,7 +691,7 @@ impl Interface {
                 }
                 selected = index;
                 let event = events[index];
-                self.screen("Подробности события")?;
+                self.screen(tui!(self.language, event_details))?;
                 let alert = Alert::from_event(settings, event, false)?;
                 self.line(&alert.text)?;
                 for (name, available) in event.changes.iter().skip(5) {
@@ -593,9 +699,9 @@ impl Interface {
                         "{}: {}",
                         display_text(name),
                         if *available {
-                            "доступен"
+                            tui!(self.language, available)
                         } else {
-                            "недоступен"
+                            tui!(self.language, unavailable)
                         }
                     ))?;
                 }
@@ -630,29 +736,29 @@ fn display_text(text: &str) -> String {
         .collect()
 }
 
-fn target_label(url: &str) -> String {
+fn target_label(language: Language, url: &str) -> String {
     if let Some((name, _)) = PRESETS.iter().find(|(_, address)| *address == url) {
         return (*name).to_owned();
     }
     Url::parse(url)
         .ok()
         .and_then(|address| address.host_str().map(display_text))
-        .unwrap_or_else(|| "Свой URL".to_owned())
+        .unwrap_or_else(|| tui!(language, custom_url).to_owned())
 }
 
-fn enabled(configured: bool) -> &'static str {
+fn enabled(language: Language, configured: bool) -> &'static str {
     if configured {
-        "включён"
+        tui!(language, enabled)
     } else {
-        "выключен"
+        tui!(language, disabled)
     }
 }
 
-fn probe_label(passed: bool) -> &'static str {
+fn probe_label(language: Language, passed: bool) -> &'static str {
     if passed {
-        "доступен"
+        tui!(language, available)
     } else {
-        "ошибка"
+        tui!(language, failed)
     }
 }
 
@@ -662,13 +768,13 @@ fn now() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn elapsed_label(now: u64, timestamp: u64) -> String {
+fn elapsed_label(language: Language, now: u64, timestamp: u64) -> String {
     match now.saturating_sub(timestamp) {
-        0..=4 => "только что".to_owned(),
-        seconds @ 5..=59 => format!("{seconds} с назад"),
-        seconds @ 60..=3599 => format!("{} мин назад", seconds / 60),
-        seconds @ 3600..=86399 => format!("{} ч назад", seconds / 3600),
-        seconds => format!("{} дн назад", seconds / 86400),
+        0..=4 => tui!(language, just_now).to_owned(),
+        seconds @ 5..=59 => tui!(language, seconds_ago, seconds),
+        seconds @ 60..=3599 => tui!(language, minutes_ago, seconds / 60),
+        seconds @ 3600..=86399 => tui!(language, hours_ago, seconds / 3600),
+        seconds => tui!(language, days_ago, seconds / 86400),
     }
 }
 
@@ -679,10 +785,13 @@ mod tests {
     #[test]
     fn custom_target_label_hides_path_credentials_and_query() {
         assert_eq!(
-            target_label("https://user:password@example.org/private/token?key=secret"),
+            target_label(
+                Language::Ru,
+                "https://user:password@example.org/private/token?key=secret"
+            ),
             "example.org"
         );
-        assert_eq!(target_label("private-token"), "Свой URL");
+        assert_eq!(target_label(Language::Ru, "private-token"), "Свой URL");
     }
 
     #[test]

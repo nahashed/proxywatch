@@ -1,3 +1,4 @@
+use crate::runtime_text::message;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
@@ -43,6 +44,7 @@ pub struct Smtp {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub language: crate::i18n::Language,
     pub instance_name: String,
     pub instance_description: String,
     pub subscription_url: String,
@@ -63,6 +65,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: crate::i18n::Language::default(),
             instance_name: hostname::get()
                 .ok()
                 .and_then(|name| name.into_string().ok())
@@ -100,7 +103,7 @@ impl Settings {
             !self.instance_name.trim().is_empty()
                 && valid_label(&self.instance_name, 64)
                 && valid_label(&self.instance_description, 160),
-            "Укажите имя до 64 символов и описание до 160 символов без ссылок и управляющих знаков"
+            message!(invalid_labels)
         );
         for raw in std::iter::once(&self.subscription_url)
             .chain(std::iter::once(&self.check_url))
@@ -112,18 +115,18 @@ impl Settings {
                     && u.has_host()
                     && u.username().is_empty()
                     && u.password().is_none()),
-                "Проверьте адрес подписки и адреса проверок. Нужны полные HTTP(S) URL."
+                message!(invalid_urls)
             );
         }
         ensure!(
             self.http_port.is_some() || self.socks_port.is_some(),
-            "Выберите хотя бы один локальный вход"
+            message!(enable_listener)
         );
         ensure!(
             self.http_port != Some(0)
                 && self.socks_port != Some(0)
                 && self.http_port != self.socks_port,
-            "HTTP и SOCKS5 требуют разных портов от 1 до 65535"
+            message!(different_ports)
         );
         ensure!(
             (1..=86400).contains(&self.interval_seconds)
@@ -131,16 +134,16 @@ impl Settings {
                 && (1..=300).contains(&self.timeout_seconds)
                 && (1..=100).contains(&self.failure_threshold)
                 && (1..=2_592_000).contains(&self.refresh_seconds),
-            "Проверьте интервалы и порог ошибок"
+            message!(invalid_intervals)
         );
         ensure!(
             !self.xray_binary.trim().is_empty() && self.diagnostic_urls.len() <= 16,
-            "Укажите путь Xray и до 16 диагностических URL"
+            message!(invalid_diagnostics)
         );
         if let Some(t) = &self.telegram {
             ensure!(
                 !t.token.trim().is_empty() && !t.chat_id.trim().is_empty(),
-                "Для Telegram нужны токен и ID чата"
+                message!(telegram_credentials)
             );
         }
         if let Some(s) = &self.smtp {
@@ -150,7 +153,7 @@ impl Settings {
                     && s.from.parse::<lettre::Address>().is_ok()
                     && s.to.parse::<lettre::Address>().is_ok()
                     && (s.username.is_empty() == s.password.is_empty()),
-                "Проверьте параметры SMTP и адреса почты"
+                message!(smtp_settings)
             );
         }
         Ok(())
@@ -198,7 +201,7 @@ pub struct State {
     pub updated_at: u64,
     pub outage: bool,
     pub pending: Vec<Event>,
-    pub skipped: Vec<String>,
+    pub skipped: Vec<crate::subscription::SkippedNode>,
 }
 
 pub struct Paths {
@@ -218,7 +221,7 @@ fn write_snapshot(transaction: &Transaction<'_>, state: &State) -> Result<()> {
     for event in state
         .history
         .get(state.saved_history..)
-        .context("История была усечена перед сохранением")?
+        .context(message!(truncated_history))?
     {
         statement.execute(params![event.at, event.kind, serde_json::to_string(event)?])?;
     }
@@ -230,7 +233,7 @@ impl Paths {
         let directory = directory
             .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("proxywatch")))
             .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".config/proxywatch")))
-            .context("Укажите каталог через --directory")?;
+            .context(message!(choose_directory))?;
         Ok(Self { directory })
     }
     pub fn ensure_directory(&self) -> Result<()> {
@@ -238,7 +241,7 @@ impl Paths {
             .recursive(true)
             .mode(0o700)
             .create(&self.directory)
-            .context("Не удалось открыть каталог Proxywatch")?;
+            .context(message!(open_directory))?;
         Ok(())
     }
     pub fn has_settings(&self) -> bool {
@@ -247,14 +250,14 @@ impl Paths {
     pub fn load_settings(&self) -> Result<Settings> {
         let s: Settings = self
             .read("settings.json")?
-            .context("Задайте настройки в proxywatch tui")?;
+            .context(message!(setup_required))?;
         s.validate()?;
         Ok(s)
     }
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
         s.validate()?;
         self.write("settings.json", s)
-            .map_err(|_| anyhow::anyhow!("Не удалось сохранить настройки Proxywatch"))
+            .map_err(|_| anyhow::anyhow!(message!(save_settings)))
     }
     pub fn read_snapshot(&self) -> Result<State> {
         let path = self.directory.join("state.sqlite3");
@@ -264,7 +267,7 @@ impl Paths {
             connection.busy_timeout(Duration::from_secs(5))?;
             let version: u32 =
                 connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            ensure!(version <= 1, "Неизвестная версия базы SQLite");
+            ensure!(version <= 1, message!(database_version));
             if version == 1 {
                 let snapshot: String =
                     connection.query_row("SELECT data FROM snapshot WHERE id = 1", [], |row| {
@@ -282,18 +285,16 @@ impl Paths {
             transaction.query_row("SELECT data FROM snapshot WHERE id = 1", [], |row| {
                 row.get(0)
             })?;
-        let mut state: State =
-            serde_json::from_str(&snapshot).context("Не удалось прочитать состояние Proxywatch")?;
+        let mut state: State = serde_json::from_str(&snapshot).context(message!(read_state))?;
         {
             let mut statement =
                 transaction.prepare("SELECT data FROM events ORDER BY id DESC LIMIT ?1")?;
             let mut rows = statement.query([HISTORY_WINDOW])?;
             while let Some(row) = rows.next()? {
                 let data: String = row.get(0)?;
-                state.history.push(
-                    serde_json::from_str(&data)
-                        .context("Не удалось прочитать событие Proxywatch")?,
-                );
+                state
+                    .history
+                    .push(serde_json::from_str(&data).context(message!(read_event))?);
             }
         }
         state.history.reverse();
@@ -321,9 +322,9 @@ impl Paths {
         {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).context("Не удалось создать файл SQLite"),
+            Err(error) => return Err(error).context(message!(create_database)),
         }
-        let mut connection = Connection::open(path).context("Не удалось открыть базу SQLite")?;
+        let mut connection = Connection::open(path).context(message!(open_database))?;
         connection.busy_timeout(Duration::from_secs(5))?;
         let version = |connection: &Connection| -> rusqlite::Result<u32> {
             connection.pragma_query_value(None, "user_version", |row| row.get(0))
@@ -342,16 +343,16 @@ impl Paths {
             }
             transaction.commit()?;
         }
-        ensure!(version(&connection)? == 1, "Неизвестная версия базы SQLite");
+        ensure!(version(&connection)? == 1, message!(database_version));
         Ok(connection)
     }
     pub fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         match File::open(self.directory.join(name)) {
             Ok(f) => serde_json::from_reader(f)
                 .map(Some)
-                .map_err(|_| anyhow::anyhow!("Не удалось разобрать файл {name}")),
+                .map_err(|_| anyhow::anyhow!(message!(parse_file, name))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("Не удалось открыть {name}")),
+            Err(e) => Err(e).with_context(|| message!(open_file, name)),
         }
     }
     pub fn write<T: Serialize>(&self, name: &str, data: &T) -> Result<()> {
@@ -371,8 +372,7 @@ impl Paths {
             .truncate(false)
             .mode(0o600)
             .open(self.directory.join("daemon.lock"))?;
-        FileExt::try_lock_exclusive(&f)
-            .context("В этом каталоге уже запущен сервис или файл блокировки недоступен")?;
+        FileExt::try_lock_exclusive(&f).context(message!(lock_unavailable))?;
         Ok(f)
     }
 }
@@ -390,6 +390,7 @@ mod tests {
             "interval_seconds": 12
         }))?;
         settings.validate()?;
+        assert_eq!(settings.language, crate::i18n::Language::Ru);
         assert!(!settings.instance_name.trim().is_empty());
         assert!(settings.instance_description.is_empty());
         assert_eq!(settings.interval_seconds, 12);

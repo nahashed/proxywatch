@@ -1,3 +1,4 @@
+use crate::runtime_text::message;
 use crate::{
     engine::Engine,
     notifications,
@@ -302,7 +303,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         interrupted.store(true, Ordering::Relaxed);
         let _ = wake.try_send(());
     })
-    .context("Не удалось установить обработчик завершения")?;
+    .context(message!(install_signal_handler))?;
     let relay = Relay::open(settings.http_port, settings.socks_port)?;
     let mut state = paths.load_state()?;
     state.status = "starting".into();
@@ -336,7 +337,7 @@ pub fn run(paths: &Paths) -> Result<()> {
                 }
                 Err(_) => {
                     if !previously_failed_refresh {
-                        eprintln!("Не удалось обновить подписку. Следующая попытка запланирована.");
+                        eprintln!("{}", message!(subscription_retry));
                     }
                     previously_failed_refresh = true;
                     delay = delay.min(settings.interval_seconds.max(5));
@@ -392,7 +393,7 @@ pub fn run(paths: &Paths) -> Result<()> {
                     .filter(|_| state.last_probe == Some(true))
                     .map(|a| a.engine.http);
                 if notifications::deliver(&settings, event, proxy).is_err() {
-                    eprintln!("Оповещение ожидает повторной доставки.");
+                    eprintln!("{}", message!(delivery_retry));
                     notify = Instant::now() + Duration::from_secs(300);
                     index += 1;
                     continue;

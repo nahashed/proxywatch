@@ -1,3 +1,6 @@
+use crate::alert_text::alerts;
+use crate::i18n::Language;
+use crate::i18n::language;
 use crate::storage::{Event, Settings, Smtp, Telegram};
 use anyhow::{Result, anyhow, ensure};
 use lettre::{
@@ -21,35 +24,38 @@ impl Alert {
         event: &Event,
         delayed_outage: bool,
     ) -> Result<Self> {
+        let lang = settings.language;
+        let words = alerts(lang);
         let title = safe_label(&settings.instance_name, "Proxywatch");
         let summary = if delayed_outage && event.kind == "outage" {
-            "Ранее все узлы были недоступны"
+            words.delayed
         } else {
-            event_label(&event.kind).ok_or_else(|| anyhow!("Неизвестный тип уведомления"))?
+            event_label(lang, &event.kind).ok_or_else(|| anyhow!(words.unknown_kind))?
         };
         let mut lines = vec![summary.to_owned()];
         if !settings.instance_description.is_empty() {
             lines.push(format!(
-                "Назначение: {}",
-                safe_label(&settings.instance_description, "не указано")
+                "{}: {}",
+                words.purpose,
+                safe_label(&settings.instance_description, words.unspecified)
             ));
         }
         for (name, available) in event.changes.iter().take(5) {
             let (indicator, state) = if *available {
-                ("🟢", "доступен")
+                ("🟢", words.up)
             } else {
-                ("🔴", "недоступен")
+                ("🔴", words.down)
             };
             lines.push(format!(
                 "{indicator} {}: {state}",
-                safe_label(name, "узел без названия")
+                safe_label(name, words.unnamed)
             ));
         }
         if event.changes.len() > 5 {
-            lines.push(format!("Ещё узлов: {}", event.changes.len() - 5));
+            lines.push(format!("{}: {}", words.more, event.changes.len() - 5));
         }
         let route = if event.kind == "outage" {
-            "остановлен".into()
+            words.stopped.into()
         } else {
             match (&event.from, &event.to) {
                 (Some(previous), Some(next))
@@ -57,26 +63,30 @@ impl Alert {
                 {
                     format!(
                         "{} → {}",
-                        safe_label(previous, "узел без названия"),
-                        safe_label(next, "узел без названия")
+                        safe_label(previous, words.unnamed),
+                        safe_label(next, words.unnamed)
                     )
                 }
                 _ => event.active.as_deref().or(event.to.as_deref()).map_or_else(
-                    || "остановлен".into(),
-                    |node| safe_label(node, "узел без названия"),
+                    || words.stopped.into(),
+                    |node| safe_label(node, words.unnamed),
                 ),
             }
         };
-        lines.push(format!("Трафик: {route}"));
+        lines.push(format!("{}: {route}", words.route));
         if event.total != 0 || event.started_at != 0 {
             lines.push(format!(
-                "Доступно узлов: {} из {}",
-                event.available, event.total
+                "{}: {} {} {}",
+                words.available, event.available, words.of, event.total
             ));
         }
-        lines.push(format!("Событие: {}", timestamp(event.at)));
+        lines.push(format!("{}: {}", words.event, timestamp(lang, event.at)));
         if event.started_at != 0 {
-            lines.push(format!("Запуск сервиса: {}", timestamp(event.started_at)));
+            lines.push(format!(
+                "{}: {}",
+                words.start,
+                timestamp(lang, event.started_at)
+            ));
         }
         Ok(Self {
             title,
@@ -94,14 +104,15 @@ impl Alert {
     }
 }
 
-pub(crate) fn event_label(kind: &str) -> Option<&'static str> {
+pub(crate) fn event_label(lang: Language, kind: &str) -> Option<&'static str> {
+    let words = alerts(lang);
     Some(match kind {
-        "snapshot" => "Сводка доступности узлов",
-        "nodes" => "Доступность узла изменилась",
-        "switch" => "Выход переключён",
-        "failback" => "Возврат на приоритетный узел",
-        "outage" => "Все узлы недоступны",
-        "recovery" => "Соединение восстановлено",
+        "snapshot" => words.snapshot,
+        "nodes" => words.nodes,
+        "switch" => words.switch,
+        "failback" => words.failback,
+        "outage" => words.outage,
+        "recovery" => words.recovery,
         _ => return None,
     })
 }
@@ -120,12 +131,12 @@ fn safe_label(value: &str, fallback: &str) -> String {
     value.chars().take(100).collect()
 }
 
-pub(crate) fn timestamp(seconds: u64) -> String {
+pub(crate) fn timestamp(lang: Language, seconds: u64) -> String {
     let Some(date) = i64::try_from(seconds)
         .ok()
         .and_then(|value| time::OffsetDateTime::from_unix_timestamp(value).ok())
     else {
-        return "неизвестно".into();
+        return alerts(lang).unknown_time.into();
     };
     format!(
         "{:02}.{:02}.{:04} {:02}:{:02}:{:02} UTC",
@@ -191,11 +202,7 @@ fn route(
     if let Some(send) = smtp {
         return send();
     }
-    telegram_result.unwrap_or_else(|| {
-        Err(anyhow!(
-            "Нет доступного выхода для Telegram. Резервная почта не настроена"
-        ))
-    })
+    telegram_result.unwrap_or_else(|| Err(anyhow!(alerts(language()).no_delivery)))
 }
 
 fn send_telegram(
@@ -204,10 +211,7 @@ fn send_telegram(
     alert: &Alert,
     timeout: Duration,
 ) -> Result<()> {
-    ensure!(
-        address.ip().is_loopback(),
-        "Для Telegram нужен локальный выход Xray"
-    );
+    ensure!(address.ip().is_loopback(), alerts(language()).local_proxy);
     ensure!(
         config.token.split_once(':').is_some_and(|(id, secret)| {
             !id.is_empty()
@@ -217,17 +221,17 @@ fn send_telegram(
                     .bytes()
                     .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
         }),
-        "Некорректный формат токена Telegram"
+        alerts(language()).token
     );
     let proxy = Proxy::all(format!("http://{address}"))
-        .map_err(|_| anyhow!("Некорректный адрес прокси для Telegram"))?;
+        .map_err(|_| anyhow!(alerts(language()).proxy_address))?;
     let client = Client::builder()
         .no_proxy()
         .proxy(proxy)
         .redirect(Policy::none())
         .timeout(timeout)
         .build()
-        .map_err(|_| anyhow!("Не удалось создать клиент Telegram"))?;
+        .map_err(|_| anyhow!(alerts(language()).client))?;
     let response = client
         .post(format!(
             "https://api.telegram.org/bot{}/sendMessage",
@@ -240,18 +244,15 @@ fn send_telegram(
             "link_preview_options": {"is_disabled": true}
         }))
         .send()
-        .map_err(|_| anyhow!("Telegram недоступен через выбранный выход"))?;
-    ensure!(
-        response.status().is_success(),
-        "Telegram отклонил уведомление"
-    );
+        .map_err(|_| anyhow!(alerts(language()).unreachable))?;
+    ensure!(response.status().is_success(), alerts(language()).rejected);
     #[derive(Deserialize)]
     struct Receipt {
         ok: bool,
     }
     let receipt: Receipt = serde_json::from_reader(response.take(65536))
-        .map_err(|_| anyhow!("Некорректное подтверждение Telegram"))?;
-    ensure!(receipt.ok, "Telegram не подтвердил отправку уведомления");
+        .map_err(|_| anyhow!(alerts(language()).receipt))?;
+    ensure!(receipt.ok, alerts(language()).unconfirmed);
     Ok(())
 }
 
@@ -261,22 +262,22 @@ fn send_email(config: &Smtp, alert: &Alert, timeout: Duration) -> Result<()> {
             config
                 .from
                 .parse()
-                .map_err(|_| anyhow!("Некорректный адрес отправителя SMTP"))?,
+                .map_err(|_| anyhow!(alerts(language()).sender))?,
         )
         .to(config
             .to
             .parse()
-            .map_err(|_| anyhow!("Некорректный адрес получателя SMTP"))?)
+            .map_err(|_| anyhow!(alerts(language()).recipient))?)
         .subject(format!("{}: {}", alert.title, alert.summary))
         .header(ContentType::TEXT_PLAIN)
         .body(format!("{}\n\n{}", alert.title, alert.text))
-        .map_err(|_| anyhow!("Не удалось сформировать письмо"))?;
+        .map_err(|_| anyhow!(alerts(language()).compose))?;
     let builder = if config.port == 465 {
         SmtpTransport::relay(&config.host)
     } else {
         SmtpTransport::starttls_relay(&config.host)
     }
-    .map_err(|_| anyhow!("Не удалось настроить TLS для SMTP"))?;
+    .map_err(|_| anyhow!(alerts(language()).tls))?;
     let builder = if config.username.is_empty() && config.password.is_empty() {
         builder
     } else {
@@ -288,7 +289,7 @@ fn send_email(config: &Smtp, alert: &Alert, timeout: Duration) -> Result<()> {
     let transport = builder.port(config.port).timeout(Some(timeout)).build();
     transport
         .send(&email)
-        .map_err(|_| anyhow!("SMTP-сервер не подтвердил отправку письма"))?;
+        .map_err(|_| anyhow!(alerts(language()).delivery))?;
     Ok(())
 }
 
@@ -371,6 +372,39 @@ mod tests {
                 .contains("\n🟢 Резерв: доступен\nТрафик: Основной\nДоступно узлов: 3 из 4")
         );
         assert!(alert.text.contains("Назначение: Проверка доступности"));
+    }
+
+    #[test]
+    fn formats_english_alerts_for_both_channels() {
+        let settings = Settings {
+            language: Language::En,
+            instance_name: "Home".into(),
+            instance_description: "Monitoring".into(),
+            ..Settings::default()
+        };
+        for kind in [
+            "snapshot", "nodes", "switch", "failback", "outage", "recovery",
+        ] {
+            let event = Event {
+                kind: kind.into(),
+                changes: vec![("Backup".into(), true)],
+                active: Some("Primary".into()),
+                available: 2,
+                total: 2,
+                ..Event::default()
+            };
+            let alert = Alert::from_event(&settings, &event, false).unwrap();
+            assert!(alert.summary.is_ascii());
+            assert!(alert.text.contains("Purpose: Monitoring"));
+            assert!(alert.markdown().contains("Backup: available"));
+            assert!(alert.text.contains("Available nodes: 2 of 2"));
+            let route = if kind == "outage" {
+                "stopped"
+            } else {
+                "Primary"
+            };
+            assert!(alert.text.contains(&format!("Traffic: {route}")));
+        }
     }
 
     #[test]

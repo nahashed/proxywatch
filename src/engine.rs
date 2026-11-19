@@ -1,3 +1,4 @@
+use crate::runtime_text::message;
 use crate::{config::private_config, subscription::Node};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Proxy, Url, blocking::Client, redirect::Policy};
@@ -20,12 +21,12 @@ pub struct Engine {
 impl Engine {
     pub fn start(binary: &Path, node: &Node, timeout: Duration) -> Result<Self> {
         let reserve = || TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
-        let http_listener = reserve().context("Не удалось выделить HTTP-порт Xray")?;
-        let socks_listener = reserve().context("Не удалось выделить SOCKS5-порт Xray")?;
+        let http_listener = reserve().context(message!(reserve_http))?;
+        let socks_listener = reserve().context(message!(reserve_socks))?;
         let http = http_listener.local_addr()?;
         let socks = socks_listener.local_addr()?;
         let config = private_config(node, http.port(), socks.port())?;
-        let mut input = tempfile::tempfile().context("Не удалось подготовить настройки Xray")?;
+        let mut input = tempfile::tempfile().context(message!(prepare_xray))?;
         serde_json::to_writer(&mut input, &config)?;
         input.flush()?;
         input.rewind()?;
@@ -35,7 +36,7 @@ impl Engine {
             .redirect(Policy::none())
             .user_agent("Proxywatch/0.1")
             .build()
-            .context("Не удалось создать клиент проверки узла")?;
+            .context(message!(create_probe))?;
         drop(http_listener);
         drop(socks_listener);
         let child = Command::new(binary)
@@ -46,7 +47,7 @@ impl Engine {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .context("Не удалось запустить Xray")?;
+            .context(message!(start_xray))?;
         let mut engine = Self {
             child,
             http,
@@ -55,32 +56,25 @@ impl Engine {
         };
         let start = Instant::now();
         loop {
-            ensure!(
-                engine.child.try_wait()?.is_none(),
-                "Xray завершился при запуске"
-            );
+            ensure!(engine.child.try_wait()?.is_none(), message!(xray_exited));
             if [http, socks].iter().all(|address| {
                 TcpStream::connect_timeout(address, Duration::from_millis(50)).is_ok()
             }) {
                 return Ok(engine);
             }
-            ensure!(
-                start.elapsed() < timeout,
-                "Истекло время запуска локальных входов Xray"
-            );
+            ensure!(start.elapsed() < timeout, message!(xray_timeout));
             thread::sleep(Duration::from_millis(20));
         }
     }
 
     pub fn probe(&self, address: &str, timeout: Duration) -> Result<()> {
-        let url =
-            Url::parse(address).map_err(|_| anyhow::anyhow!("Некорректный адрес проверки"))?;
+        let url = Url::parse(address).map_err(|_| anyhow::anyhow!(message!(invalid_probe_url)))?;
         ensure!(
             matches!(url.scheme(), "http" | "https")
                 && url.host_str().is_some()
                 && url.username().is_empty()
                 && url.password().is_none(),
-            "Для проверки нужен HTTP(S) URL без учётных данных"
+            message!(probe_url_credentials)
         );
         let response = self
             .client
@@ -89,16 +83,16 @@ impl Engine {
             .send()
             .map_err(|error| {
                 if error.is_timeout() {
-                    anyhow::anyhow!("Истекло время проверки")
+                    anyhow::anyhow!(message!(probe_timeout))
                 } else {
-                    anyhow::anyhow!("Не удалось выполнить запрос через узел")
+                    anyhow::anyhow!(message!(probe_failed))
                 }
             })?;
         let status = response.status();
         if status.is_success() || status.is_redirection() {
             Ok(())
         } else {
-            bail!("Проверка вернула HTTP {}", status.as_u16())
+            bail!(message!(probe_status, status.as_u16()))
         }
     }
 }
@@ -106,10 +100,10 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         if self.child.kill().is_err() && !matches!(self.child.try_wait(), Ok(Some(_))) {
-            eprintln!("Не удалось остановить дочерний процесс Xray");
+            eprintln!("{}", message!(stop_xray));
         }
         if self.child.wait().is_err() {
-            eprintln!("Не удалось дождаться завершения Xray");
+            eprintln!("{}", message!(wait_xray));
         }
     }
 }

@@ -23,7 +23,7 @@ For a private release or an offline machine, use the installer from a local chec
 
 ## First run
 
-1. Run `proxywatch` as the account that will run the service. The terminal UI is in Russian. Name the installation, enter the subscription URL and choose a URL that must be reachable through the proxy.
+1. Run `proxywatch` as the account that will run the service. On first setup, choose English or Русский. Name the installation, enter the subscription URL and choose a URL that must be reachable through the proxy.
 2. Choose HTTP, SOCKS5 (TCP), or both on separate ports. Defaults are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5. Choose unused ports if another proxy is already running.
 3. Save the settings, then run `proxywatch run` in the foreground or enable the systemd user service:
 
@@ -50,6 +50,14 @@ proxywatch status --json
 Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
 
 Status reports the last saved snapshot. It includes a schema version, the configuration flag, the recorded service state, the Unix update timestamp, whether the preferred node is active, and counts for nodes and queued notifications. It also works before the first run. Exit codes are 0 for success, 1 for an operation or configuration error, and 2 for invalid command syntax.
+
+Before setup, both languages return this status:
+
+```json
+{"schema_version":1,"configured":false,"status":"unknown","updated_at":0,"active_is_preferred":null,"nodes_total":0,"nodes_available":0,"pending_notifications":0}
+```
+
+Set `"language": "en"` or `"language": "ru"` in the settings object to select the language for menus, CLI messages and alerts. You can also change it in Settings. Existing configurations default to Russian. The status JSON and exit codes are identical in both languages.
 
 ## What happens when a node fails?
 

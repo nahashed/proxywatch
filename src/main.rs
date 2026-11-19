@@ -1,69 +1,164 @@
+mod alert_text;
 mod automation;
+mod cli_text;
 mod config;
 mod engine;
+mod i18n;
 mod interface;
 mod monitor;
 mod notifications;
 mod profile;
 mod relay;
+mod runtime_text;
 mod storage;
 mod subscription;
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use anyhow::{Context, Result};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use cli_text::text;
+use std::{
+    ffi::{OsStr, OsString},
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
+    process::ExitCode,
+};
+
+fn template(command: &str) -> String {
+    let labels = text();
+    let mut help = format!("{{about}}\n\n{}: proxywatch", labels.usage);
+    if !command.is_empty() {
+        help.push(' ');
+        help.push_str(command);
+    }
+    help.push_str(&format!(" [{}]", labels.options_value));
+    match command {
+        "" | "help" => help.push_str(&format!(" [{}]", labels.command_value)),
+        "configure" => help.push_str(" --stdin"),
+        "status" => help.push_str(" --json"),
+        _ => {}
+    }
+    help.push_str("\n\n");
+    match command {
+        "" => help.push_str(&format!("{}:\n{{subcommands}}\n\n", labels.commands)),
+        "help" => help.push_str("{positionals}\n\n"),
+        _ => {}
+    }
+    help.push_str(&format!("{}:\n{{options}}", labels.options));
+    help
+}
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Управляет локальным прокси и переключает узлы при сбое"
-)]
+#[command(version, about = text().about, help_template = template(""),
+    disable_help_flag = true, disable_version_flag = true, disable_help_subcommand = true)]
 struct Arguments {
-    #[arg(long, global = true, help = "Каталог настроек и истории")]
+    #[arg(long, global = true, value_name = text().directory_value, help = text().directory)]
     directory: Option<PathBuf>,
+    #[arg(short = 'h', long, global = true, action = ArgAction::Help, help = text().help)]
+    help: Option<bool>,
+    #[arg(short = 'V', long, action = ArgAction::Version, help = text().version)]
+    version: Option<bool>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Запустить фоновый сервис в текущем процессе")]
+    #[command(about = text().run, help_template = template("run"))]
     Run,
-    #[command(about = "Открыть настройки и историю")]
+    #[command(about = text().tui, help_template = template("tui"))]
     Tui,
-    #[command(about = "Записать настройки из JSON")]
+    #[command(about = text().configure, help_template = template("configure"))]
     Configure {
-        #[arg(
-            long,
-            required = true,
-            help = "Прочитать настройки из стандартного ввода"
-        )]
+        #[arg(long, required = true, help = text().stdin)]
         stdin: bool,
     },
-    #[command(about = "Прочитать последнее сохранённое состояние")]
+    #[command(about = text().status, help_template = template("status"))]
     Status {
-        #[arg(long, required = true, help = "Вывести состояние в формате JSON")]
+        #[arg(long, required = true, help = text().json)]
         json: bool,
+    },
+    #[command(about = text().help_command, help_template = template("help"))]
+    Help {
+        #[arg(value_parser = ["run", "tui", "configure", "status", "help"], hide_possible_values = true, value_name = text().command_value, help = text().help_topics)]
+        command: Option<String>,
     },
 }
 
-fn main() -> Result<()> {
-    let arguments = Arguments::try_parse().unwrap_or_else(|error| {
+// Clap handles help before returning parsed arguments. Resolve the saved language
+// first, including the global option on either side of the subcommand.
+fn select_language(arguments: &[OsString]) {
+    let mut directory = None;
+    let mut options = arguments.iter().skip(1);
+    while let Some(option) = options.next() {
+        if option == "--" {
+            break;
+        }
+        if option == "--directory" {
+            directory = options.next().map(PathBuf::from);
+        } else if let Some(value) = option.as_bytes().strip_prefix(b"--directory=") {
+            directory = Some(PathBuf::from(OsStr::from_bytes(value)));
+        }
+    }
+    #[derive(serde::Deserialize)]
+    struct Preference {
+        language: i18n::Language,
+    }
+    // A missing or malformed preference must allow help and configuration repair.
+    let preference = storage::Paths::resolve(directory)
+        .ok()
+        .and_then(|paths| paths.read::<Preference>("settings.json").ok().flatten());
+    i18n::set_language(preference.map(|value| value.language).unwrap_or_default());
+}
+
+fn main() -> ExitCode {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    select_language(&arguments);
+    let arguments = Arguments::try_parse_from(arguments).unwrap_or_else(|error| {
         if error.use_stderr() {
-            eprintln!("Некорректные аргументы. Используйте --help.");
+            eprintln!("{}", text().arguments);
             std::process::exit(2);
         }
         error.exit()
     });
-    let paths = storage::Paths::resolve(arguments.directory)?;
+    match execute(arguments) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{}: {error}", text().error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn execute(arguments: Arguments) -> Result<()> {
     let command = arguments.command.unwrap_or(Command::Tui);
-    if !matches!(command, Command::Status { .. }) {
+    let writable_paths = || -> Result<storage::Paths> {
+        let paths = storage::Paths::resolve(arguments.directory.clone())?;
         paths.ensure_directory()?;
-    }
+        Ok(paths)
+    };
     match command {
-        Command::Status { .. } => automation::status(&paths, std::io::stdout().lock()),
-        Command::Configure { .. } => automation::configure(&paths, std::io::stdin().lock()),
-        Command::Run => monitor::run(&paths),
-        Command::Tui => interface::run(&paths),
+        Command::Help { command } => print_help(command.as_deref()),
+        Command::Status { .. } => automation::status(
+            &storage::Paths::resolve(arguments.directory)?,
+            std::io::stdout().lock(),
+        ),
+        Command::Configure { .. } => {
+            automation::configure(&writable_paths()?, std::io::stdin().lock())
+        }
+        Command::Run => monitor::run(&writable_paths()?),
+        Command::Tui => interface::run(&writable_paths()?),
     }
+}
+
+fn print_help(command: Option<&str>) -> Result<()> {
+    let mut definition = Arguments::command();
+    definition.build();
+    let help = match command {
+        Some(command) => definition
+            .find_subcommand_mut(command)
+            .context(text().arguments)?,
+        None => &mut definition,
+    };
+    help.print_help()?;
+    Ok(())
 }
