@@ -253,9 +253,9 @@ fn bandwidth(value: &str) -> NodeResult<f64> {
 fn validate_fingerprint(value: &str) -> NodeResult<()> {
     // Xray's REALITY client uses the TLS registry except for unsafe and hellogolang.
     // An empty fingerprint selects Xray's default, independently of the named presets.
-    const NAMES: &str = include_str!("../data/xray-v26.7.28-reality-fingerprints.txt");
+    const NAMES: &[&str] = &include!("../data/xray-v26.7.28-reality-fingerprints.ron");
     require!(
-        value.is_empty() || NAMES.lines().any(|name| name.eq_ignore_ascii_case(value)),
+        value.is_empty() || NAMES.iter().any(|name| name.eq_ignore_ascii_case(value)),
         unknown_fingerprint
     );
     Ok(())

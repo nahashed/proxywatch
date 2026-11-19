@@ -1,3 +1,6 @@
+#[path = "../data/mihomo-fields.rs"]
+mod mihomo_fields;
+
 use crate::i18n::Language;
 use crate::profile::validate_outbound;
 use crate::runtime_text::{self, NodeError, NodeResult, message, node_error, require};
@@ -154,25 +157,16 @@ fn text<'a>(fields: &'a Map<String, Value>, key: &'static str) -> NodeResult<&'a
         .ok_or_else(|| node_error!(required_string, key))
 }
 
-fn known(fields: &Map<String, Value>, extra: &[&str]) -> NodeResult<()> {
-    let common = [
-        "name",
-        "type",
-        "server",
-        "port",
-        "udp",
-        "tfo",
-        "mptcp",
-        "skip-cert-verify",
-        "smux",
-    ];
+fn validate_fields(fields: &Map<String, Value>, protocol_fields: &[&str]) -> NodeResult<()> {
     require!(
         fields
             .keys()
-            .all(|key| common.contains(&key.as_str()) || extra.contains(&key.as_str())),
+            .all(|key| mihomo_fields::COMMON.contains(&key.as_str())
+                || mihomo_fields::DISABLED_ONLY.contains(&key.as_str())
+                || protocol_fields.contains(&key.as_str())),
         unsupported_mihomo_fields
     );
-    for key in ["tfo", "mptcp", "skip-cert-verify"] {
+    for &key in mihomo_fields::DISABLED_ONLY {
         require!(
             fields.get(key).is_none_or(|value| value == false),
             unsupported_option,
@@ -189,20 +183,7 @@ fn known(fields: &Map<String, Value>, extra: &[&str]) -> NodeResult<()> {
 }
 
 fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Value> {
-    known(
-        fields,
-        &[
-            "uuid",
-            "tls",
-            "network",
-            "reality-opts",
-            "encryption",
-            "flow",
-            "servername",
-            "client-fingerprint",
-            "packet-encoding",
-        ],
-    )?;
+    validate_fields(fields, mihomo_fields::VLESS)?;
     require!(
         fields.get("tls").is_some_and(|value| value == true),
         require_vless_reality
@@ -223,7 +204,12 @@ fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Val
         .get("reality-opts")
         .and_then(Value::as_object)
         .ok_or_else(|| node_error!(require_reality_opts))?;
-    require!(limits.keys().all(|key| ["public-key","short-id","support-x25519mlkem768"].contains(&key.as_str())), unsupported_reality_options);
+    require!(
+        limits
+            .keys()
+            .all(|key| mihomo_fields::REALITY.contains(&key.as_str())),
+        unsupported_reality_options
+    );
     require!(
         limits.get("support-x25519mlkem768").is_none(),
         unsupported_reality_group
@@ -243,20 +229,7 @@ fn vless(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Val
 }
 
 fn hysteria(fields: &Map<String, Value>, server: &str, port: u64) -> NodeResult<Value> {
-    known(
-        fields,
-        &[
-            "password",
-            "sni",
-            "alpn",
-            "obfs",
-            "obfs-password",
-            "fingerprint",
-            "up",
-            "down",
-            "bbr-profile",
-        ],
-    )?;
+    validate_fields(fields, mihomo_fields::HYSTERIA2)?;
     let mut tls = json!({"serverName": fields.get("sni").map_or(json!(server), Value::clone)});
     if let Some(value) = fields.get("alpn") {
         tls["alpn"] = value.clone();

@@ -206,15 +206,14 @@ pub struct Paths {
 }
 
 const HISTORY_WINDOW: usize = 500;
+const READ_SNAPSHOT: &str = include_str!("../data/sql/read-snapshot.sql");
 
 fn write_snapshot(transaction: &Transaction<'_>, state: &State) -> Result<()> {
     transaction.execute(
-        "INSERT INTO snapshot(id, data) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        include_str!("../data/sql/upsert-snapshot.sql"),
         [serde_json::to_string(state)?],
     )?;
-    let mut statement =
-        transaction.prepare("INSERT INTO events(occurred_at, kind, data) VALUES (?1, ?2, ?3)")?;
+    let mut statement = transaction.prepare(include_str!("../data/sql/insert-event.sql"))?;
     for event in state
         .history
         .get(state.saved_history..)
@@ -266,10 +265,7 @@ impl Paths {
                 connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
             ensure!(version <= 1, message!(database_version));
             if version == 1 {
-                let snapshot: String =
-                    connection.query_row("SELECT data FROM snapshot WHERE id = 1", [], |row| {
-                        row.get(0)
-                    })?;
+                let snapshot: String = connection.query_row(READ_SNAPSHOT, [], |row| row.get(0))?;
                 return Ok(serde_json::from_str(&snapshot)?);
             }
         }
@@ -278,14 +274,11 @@ impl Paths {
     pub fn load_state(&self) -> Result<State> {
         let mut connection = self.database()?;
         let transaction = connection.transaction()?;
-        let snapshot: String =
-            transaction.query_row("SELECT data FROM snapshot WHERE id = 1", [], |row| {
-                row.get(0)
-            })?;
+        let snapshot: String = transaction.query_row(READ_SNAPSHOT, [], |row| row.get(0))?;
         let mut state: State = serde_json::from_str(&snapshot).context(message!(read_state))?;
         {
             let mut statement =
-                transaction.prepare("SELECT data FROM events ORDER BY id DESC LIMIT ?1")?;
+                transaction.prepare(include_str!("../data/sql/recent-events.sql"))?;
             let mut rows = statement.query([HISTORY_WINDOW])?;
             while let Some(row) = rows.next()? {
                 let data: String = row.get(0)?;
@@ -331,11 +324,7 @@ impl Paths {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version(&transaction)? == 0 {
                 let legacy: State = self.read("state.json")?.unwrap_or_default();
-                transaction.execute_batch(
-                    "CREATE TABLE snapshot(id INTEGER PRIMARY KEY CHECK(id = 1), data TEXT NOT NULL);
-                     CREATE TABLE events(id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
-                     PRAGMA user_version = 1;",
-                )?;
+                transaction.execute_batch(include_str!("../data/sql/create-schema-v1.sql"))?;
                 write_snapshot(&transaction, &legacy)?;
             }
             transaction.commit()?;

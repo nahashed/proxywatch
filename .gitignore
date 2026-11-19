@@ -1,12 +1,5 @@
 /target/
 .DS_Store
-/.prompts/
-/.rules
-/AGENTS.md
-/CLAUDE.md
-/GEMINI.md
-/assets/telegram/
-/deploy/github-about.json
 
 /settings.json
 /state.json
