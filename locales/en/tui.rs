@@ -54,10 +54,10 @@ macro_rules! tui_en {
     (ports_in_use) => { "Local ports are in use" };
     (occupied_address) => { "Proxywatch cannot listen on 127.0.0.1:{}." };
     (change_ports) => { "Choose other ports" };
-    (retry_ports) => { "Check ports again" };
+    (retry_ports) => { "Check whether the ports are free" };
     (return_to_settings) => { "Return to settings" };
     (detected_listeners) => { "xray.service (PID {}) owns the occupied ports. Proxywatch would use the following addresses and protocols." };
-    (listeners_busy) => { "xray.service has active connections. Choose other ports or check again after clients disconnect." };
+    (listeners_busy) => { "xray.service has active connections. Wait for clients to disconnect or choose other ports.\nTo stop Xray manually, run systemctl stop xray.service in another terminal on this host. This disconnects current clients. Then check the ports again." };
     (unknown_listeners) => { "Proxywatch could not confirm that a dedicated xray.service owns these ports. Choose other ports or free them and check again." };
     (test_handover) => { "Test the subscription for handover" };
     (checking_handover) => { "Downloading the subscription and checking the configured URL through a node on a temporary local port. xray.service is still running." };
