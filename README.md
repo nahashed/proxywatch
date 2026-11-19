@@ -2,84 +2,55 @@ English | [Русский](README.ru.md)
 
 # Proxywatch
 
-Give your application one local HTTP or SOCKS5 endpoint. If its upstream stops reaching the service you need, Proxywatch routes new connections through a working backup on the same port. If every node fails, it stops forwarding rather than sending traffic directly.
-
-Proxywatch runs on Linux. It uses [Xray](https://github.com/XTLS/Xray-core) for proxy connections and reads Mihomo YAML subscriptions. It does not need a panel API or admin token.
+Proxywatch gives Linux applications a stable local HTTP or SOCKS5 proxy. It checks whether each upstream can reach the service you use. If the active route fails, new connections use a healthy backup on the same local port.
 
 ## Features
 
-- Run an HTTP proxy, a SOCKS5 TCP proxy, or both on separate loopback ports.
-- Check the target service through each node. After a confirmed failure, send new connections to a working reserve on the same local port. Return to the preferred node when it recovers.
-- Import VLESS/REALITY/Vision over TCP and Hysteria2 from a Mihomo YAML `proxies` list. View the reason for each skipped entry in the menu. A failed refresh preserves the last valid subscription. Providers that require device identification can receive an optional HWID.
-- Send Telegram alerts through the active proxy and use direct SMTP for a total outage or failed Telegram delivery. Menus and alerts support English and Russian.
-- Configure from JSON, read status from scripts and keep node history and queued notifications locally in SQLite.
+- Run HTTP, SOCKS5 (TCP), or both. The default endpoints are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5.
+- Read VLESS/REALITY/Vision over TCP and Hysteria2 nodes from a Mihomo YAML subscription. You can use a link from Remnawave, Marzban, or 3x-ui (X-UI) when the panel serves a compatible `proxies` list. Setup only needs the subscription URL. If a refresh fails, Proxywatch keeps the last valid list.
+- Choose the preferred node by the fastest successful HTTP check. By default, Proxywatch checks the active node every 30 seconds and reserves every 15 minutes. After three consecutive failures it checks the reserves immediately. When the preferred node recovers, new connections return to it. During a total outage forwarding stops. Existing connections may need to reconnect.
+- Receive Telegram alerts through the active proxy and email via direct SMTP during a total outage or when Telegram delivery fails. Event times are in UTC.
+- Inspect node health and event history in the terminal, or read machine-readable status from a script. History and queued alerts are stored locally in SQLite.
 
-## Install
+## Install or update
 
-The Linux binaries target x86_64 and aarch64 with glibc and are tested on Debian 12. Install Xray separately (tested with 26.7.28). Set its absolute path in the setup menu if it is not on `PATH`. For a public release, download the installer and run it:
+Available for Linux x86_64 and ARM64. Run the same command for installation and updates:
 
 ```sh
 curl -fsSLo install.sh https://github.com/nahashed/proxywatch/releases/latest/download/install.sh &&
   sudo bash install.sh
 ```
 
-The installer selects the latest stable release for your Linux architecture, checks the archive against its SHA-256 manifest and installs `proxywatch`. It also creates the `pwch` shortcut if that command is free. It does not reconfigure Xray or start a service.
+The installer verifies the archive with SHA-256. Proxywatch uses [Xray-core](https://github.com/XTLS/Xray-core) 26.7.28 or later. If a compatible installation is missing, interactive setup offers to install a verified copy of Xray 26.7.28 in `/usr/local/lib/proxywatch/xray`. The installer leaves the system Xray in place. Extracting the engine archive requires unzip or Python 3. For unattended installation, use `--non-interactive --with-xray`. See `bash install.sh --help` for offline and version-specific installation.
 
-To update, run `sudo bash install.sh` again. If the installed files match the verified release, the installer exits successfully without replacing them. An update preserves your settings and SQLite database. Restart any running Proxywatch process to use the new binary. For a systemd user service, run `systemctl --user daemon-reload && systemctl --user restart proxywatch.service` as the service owner.
-
-For a private release or an offline machine, use the installer from a local checkout and the archive and `SHA256SUMS` from the trusted release. With both assets in `./release`, run `sudo bash install.sh --from ./release --version v0.1.0`. Before a release is available, build from the checkout with `cargo build --release --locked` and run `./target/release/proxywatch`.
+Updates preserve settings and the database. An identical release leaves the installed application and its running service untouched. When files change, the installer restarts the invoking account’s active packaged service if available and reports when a manual restart is needed. The primary command is `proxywatch`. The installer adds the shortcut `pwch` when available.
 
 ## First run
 
-1. Run `proxywatch` as the account that will run the service. On first setup, choose English or Русский. Name the installation, enter the subscription URL and choose a URL that must be reachable through the proxy.
-2. Choose HTTP, SOCKS5 (TCP), or both on separate ports. Defaults are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5. Choose unused ports if another proxy is already running.
-3. Save the settings, then run `proxywatch run` in the foreground or enable the systemd user service:
+1. On a fresh interactive install, setup opens for the invoking account. You can reopen it with `proxywatch`. Choose a language, name the installation, enter the subscription URL, and choose a URL that your applications need to reach.
+2. Choose the local protocols and ports. Optionally configure Telegram, SMTP, or subscription device identification.
+3. Save the settings. On a system with an available systemd user manager, Proxywatch enables and starts its installed user service. Otherwise setup shows the command for running in the foreground. Point your application at the chosen local endpoint.
 
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now proxywatch.service
-```
+Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 
-Point your application at the local port. Reopen `proxywatch` to see the active route, node health and event history. Restart the daemon after changing settings. To keep a user service running after logout, enable lingering for that account.
+## CLI for scripts and agents
 
-## Automation
-
-Run these commands as the service owner. Supply a settings object on standard input. The file can contain credentials, so restrict its permissions. A minimal example with a placeholder subscription URL is:
-
-```json
-{"subscription_url":"https://example.invalid/subscription"}
-```
+Run these commands as the account that owns the configuration. Restrict access to files containing credentials.
 
 ```sh
 proxywatch configure --stdin < settings.json
+proxywatch configure --stdin --merge < changes.json
 proxywatch status --json
 ```
 
-For a single listener, set the unused port to `null` in the JSON settings. For example, `"socks_port": null` leaves only HTTP enabled. Omitting a port uses its default.
+A minimal settings file is `{"subscription_url":"https://example.invalid/subscription"}`. The first command writes a complete configuration and fills omitted fields with defaults. Use `--merge` to change selected fields in an existing configuration. Nested objects are merged and arrays are replaced. For example, `{"socks_port":null}` disables SOCKS5 while keeping the HTTP settings. Input is validated before saving. Restart a running daemon after changing settings from the CLI.
 
-If your subscription provider requires a device ID, choose automatic or custom HWID in subscription settings. In JSON, `"subscription_hwid": true` derives a stable ID from the Linux machine ID and provider origin, while `"subscription_hwid": "my-cluster-id"` sends that exact value. Proxywatch sends `x-hwid` only with HTTPS subscription requests to the configured origin. Sending it is disabled by default. Use a custom value only where you have permission to assign the identifier.
+For providers that require device identification, set `subscription_hwid` to `true` for an automatic ID derived from the Linux machine ID and provider origin, or to a custom string such as `"my-x-hwid-01"`. Automatic IDs are 64 hexadecimal characters (HMAC-SHA256). A custom ID accepts 10 to 64 ASCII letters, digits, hyphens, or equals signs. Use custom values where you have permission to assign the identifier. The default is `false`. When enabled, Proxywatch sends `x-hwid` with HTTPS subscription requests to the configured origin.
 
-Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
-
-Status reports the last saved snapshot. It includes a schema version, the configuration flag, the recorded service state, the Unix update timestamp, whether the preferred node is active, and counts for nodes and queued notifications. It also works before the first run. Exit codes are 0 for success, 1 for an operation or configuration error, and 2 for invalid command syntax.
-
-Before setup, both languages return this status:
-
-```json
-{"schema_version":1,"configured":false,"status":"unknown","updated_at":0,"active_is_preferred":null,"nodes_total":0,"nodes_available":0,"pending_notifications":0}
-```
-
-Set `"language": "en"` or `"language": "ru"` in the settings object to select the language for menus, CLI messages and alerts. You can also change it in Settings. Existing configurations default to Russian. The status JSON and exit codes are identical in both languages.
-
-## What happens when a node fails?
-
-Suppose node A is preferred and B is on standby. By default, Proxywatch checks A every 30 seconds. After three consecutive failures it tries the reserves. If B passes the same check, **new connections use B**. Your application keeps its proxy address, though existing connections may need to reconnect. Once A passes again, **new connections return to A**, even if B is healthy.
-
-- **Selection:** the first scan prefers the fastest successful HTTP response through a node (2xx or 3xx), not the lowest ICMP ping. The preference survives restarts. Reserves are checked every 15 minutes by default and on failover. Additional diagnostic URLs do not trigger switches.
-- **Local data:** each installation keeps its history and notification queue in SQLite under `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). The same directory holds subscription and notification credentials. Keep it private. Use `--directory PATH` for a separate instance.
+`status --json` returns the latest saved snapshot, including node counts, the last update as a Unix timestamp, and pending alerts. JSON keys, values, and exit codes are independent of the interface language. Exit codes are `0` for success, `1` for a configuration or runtime error, and `2` for invalid command syntax.
 
 ## Project
 
-Maintainer: [@nahashed](https://github.com/nahashed). Report bugs or suggest changes in [GitHub Issues](https://github.com/nahashed/proxywatch/issues). Do not include subscription URLs, bot tokens or SMTP passwords in reports.
+Report bugs and suggest changes in [GitHub Issues](https://github.com/nahashed/proxywatch/issues). Remove subscription URLs, bot tokens, and SMTP passwords from reports.
 
-License: [GNU Affero General Public License v3.0](LICENSE).
+Licensed under the [GNU Affero General Public License v3.0](LICENSE).
