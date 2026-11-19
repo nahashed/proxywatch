@@ -250,9 +250,23 @@ impl Paths {
         s.validate()?;
         Ok(s)
     }
-    pub fn save_settings(&self, s: &Settings) -> Result<()> {
-        s.validate()?;
-        self.write("settings.json", s)
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let _guard = self.lock_settings()?;
+        self.write_settings(settings)
+    }
+    pub fn update_settings(&self, update: impl FnOnce() -> Result<Settings>) -> Result<()> {
+        let _guard = self.lock_settings()?;
+        self.write_settings(&update()?)
+    }
+    fn lock_settings(&self) -> Result<File> {
+        // Replacing settings.json changes its inode. The directory lock survives the rename.
+        let directory = File::open(&self.directory).context(message!(open_directory))?;
+        FileExt::lock_exclusive(&directory).context(message!(save_settings))?;
+        Ok(directory)
+    }
+    fn write_settings(&self, settings: &Settings) -> Result<()> {
+        settings.validate()?;
+        self.write("settings.json", settings)
             .map_err(|_| anyhow::anyhow!(message!(save_settings)))
     }
     pub fn read_snapshot(&self) -> Result<State> {

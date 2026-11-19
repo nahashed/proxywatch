@@ -38,7 +38,7 @@ fn template(command: &str) -> String {
     help.push_str(&format!(" [{}]", labels.options_value));
     match command {
         "" | "help" => help.push_str(&format!(" [{}]", labels.command_value)),
-        "configure" => help.push_str(" --stdin"),
+        "configure" => help.push_str(" --stdin [--merge]"),
         "status" => help.push_str(" --json"),
         _ => {}
     }
@@ -76,6 +76,8 @@ enum Command {
     Configure {
         #[arg(long, required = true, help = text().stdin)]
         stdin: bool,
+        #[arg(long, help = text().merge)]
+        merge: bool,
     },
     #[command(about = text().status, help_template = template("status"))]
     Status {
@@ -147,8 +149,8 @@ fn execute(arguments: Arguments) -> Result<()> {
             &storage::Paths::resolve(arguments.directory)?,
             std::io::stdout().lock(),
         ),
-        Command::Configure { .. } => {
-            automation::configure(&writable_paths()?, std::io::stdin().lock())
+        Command::Configure { merge, .. } => {
+            automation::configure(&writable_paths()?, std::io::stdin().lock(), merge)
         }
         Command::Run => monitor::run(&writable_paths()?),
         Command::Tui => interface::run(&writable_paths()?),

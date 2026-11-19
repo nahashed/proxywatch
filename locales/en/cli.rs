@@ -16,6 +16,7 @@ CliText {
     version: "Show version",
     directory: "Directory for settings and history",
     stdin: "Read settings from standard input",
+    merge: "Update only the supplied fields in the existing settings",
     json: "Print status as JSON",
     error: "Error",
     arguments: "Invalid arguments. Use --help.",

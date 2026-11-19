@@ -18,6 +18,7 @@ pub struct CliText {
     pub version: &'static str,
     pub directory: &'static str,
     pub stdin: &'static str,
+    pub merge: &'static str,
     pub json: &'static str,
     pub error: &'static str,
     pub arguments: &'static str,

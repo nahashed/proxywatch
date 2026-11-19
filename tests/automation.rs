@@ -162,3 +162,127 @@ fn language_changes_help_and_errors_but_not_status_json_or_exit_codes() -> Resul
     assert!(fixed.status.success() && fixed.stdout.is_empty() && fixed.stderr.is_empty());
     Ok(())
 }
+
+#[test]
+fn merge_preserves_unmentioned_settings_and_replaces_arrays_and_nullable_values() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path();
+    let settings = path.join("settings.json");
+    let merge = ["configure", "--stdin", "--merge"];
+    let error = cli(path, &merge, b"{}")?;
+    assert_eq!(error.status.code(), Some(1));
+    assert!(!settings.exists());
+    let original = json!({
+        "subscription_url":"https://example.invalid/sub",
+        "http_port":12345,
+        "diagnostic_urls":["https://example.invalid/first","https://example.invalid/second"],
+        "telegram":{"token":"private-canary","chat_id":"room"},
+        "smtp":{"host":"mail.example.invalid","port":465,"username":"account","password":"private-canary","from":"a@example.invalid","to":"b@example.invalid"}
+    });
+    assert!(
+        cli(
+            path,
+            &["configure", "--stdin"],
+            &serde_json::to_vec(&original)?
+        )?
+        .status
+        .success()
+    );
+    let patch = json!({"telegram":{"chat_id":"new-room"},"smtp":{"port":587},"diagnostic_urls":["https://example.invalid/new"],"socks_port":null});
+    let result = cli(path, &merge, &serde_json::to_vec(&patch)?)?;
+    assert!(result.status.success() && result.stdout.is_empty() && result.stderr.is_empty());
+    let saved = fs::read(&settings)?;
+    let current: Value = serde_json::from_slice(&saved)?;
+    assert_eq!(
+        current["telegram"],
+        json!({"token":"private-canary","chat_id":"new-room"})
+    );
+    let mut expected_mail = original["smtp"].clone();
+    expected_mail["port"] = json!(587);
+    assert_eq!(current["smtp"], expected_mail);
+    assert_eq!(current["diagnostic_urls"], patch["diagnostic_urls"]);
+    assert!(current["socks_port"].is_null());
+    assert_eq!(current["http_port"], 12345);
+    for invalid in [
+        r#"{"http_port":null}"#,
+        r#"{"subscription_url":null}"#,
+        r#"{"smtp":{"private-canary":null}}"#,
+        r#"{"http_port":123,"http_port":432}"#,
+        r#"{"telegram":{"chat_id":"private-canary","chat_id":"second"}}"#,
+        r#"{"interval_seconds":"private-canary"}"#,
+    ] {
+        let failure = cli(path, &merge, invalid.as_bytes())?;
+        assert_eq!(failure.status.code(), Some(1));
+        assert!(
+            failure.stdout.is_empty()
+                && !String::from_utf8(failure.stderr)?.contains("private-canary")
+        );
+        assert_eq!(fs::read(&settings)?, saved);
+    }
+    assert!(
+        cli(path, &merge, br#"{"telegram":null,"smtp":null}"#)?
+            .status
+            .success()
+    );
+    let cleared: Value = serde_json::from_slice(&fs::read(&settings)?)?;
+    assert!(cleared["telegram"].is_null() && cleared["smtp"].is_null());
+    let damaged = b"{private-canary";
+    fs::write(&settings, damaged)?;
+    let failure = cli(path, &merge, b"{}")?;
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(
+        failure.stdout.is_empty() && !String::from_utf8(failure.stderr)?.contains("private-canary")
+    );
+    assert_eq!(fs::read(&settings)?, damaged);
+    Ok(())
+}
+
+#[test]
+fn parallel_merges_retain_each_other_changes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path();
+    assert!(
+        cli(
+            path,
+            &["configure", "--stdin"],
+            br#"{"subscription_url":"https://example.invalid/sub"}"#
+        )?
+        .status
+        .success()
+    );
+    let updates = [
+        json!({"instance_name":"server-a"}),
+        json!({"instance_description":"monitor"}),
+        json!({"interval_seconds":11}),
+        json!({"reserve_interval_seconds":22}),
+        json!({"timeout_seconds":9}),
+        json!({"refresh_seconds":77}),
+        json!({"failure_threshold":7}),
+        json!({"language":"en"}),
+    ];
+    std::thread::scope(|scope| {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(updates.len()));
+        for update in &updates {
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                let result = cli(
+                    path,
+                    &["configure", "--stdin", "--merge"],
+                    &serde_json::to_vec(update).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    result.status.success() && result.stdout.is_empty() && result.stderr.is_empty()
+                );
+            });
+        }
+    });
+    let saved: Value = serde_json::from_slice(&fs::read(path.join("settings.json"))?)?;
+    for update in updates {
+        for (key, value) in update.as_object().unwrap() {
+            assert_eq!(&saved[key], value);
+        }
+    }
+    Ok(())
+}
