@@ -23,12 +23,14 @@ pub const PRESETS: &[(&str, &str)] = &[
 ];
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Telegram {
     pub token: String,
     pub chat_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Smtp {
     pub host: String,
     pub port: u16,
@@ -39,7 +41,7 @@ pub struct Smtp {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub instance_name: String,
     pub instance_description: String,
@@ -224,17 +226,20 @@ fn write_snapshot(transaction: &Transaction<'_>, state: &State) -> Result<()> {
 }
 
 impl Paths {
-    pub fn open(directory: Option<PathBuf>) -> Result<Self> {
+    pub fn resolve(directory: Option<PathBuf>) -> Result<Self> {
         let directory = directory
             .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("proxywatch")))
             .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".config/proxywatch")))
             .context("Укажите каталог через --directory")?;
+        Ok(Self { directory })
+    }
+    pub fn ensure_directory(&self) -> Result<()> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&directory)
+            .create(&self.directory)
             .context("Не удалось открыть каталог Proxywatch")?;
-        Ok(Self { directory })
+        Ok(())
     }
     pub fn has_settings(&self) -> bool {
         self.directory.join("settings.json").is_file()
@@ -249,6 +254,26 @@ impl Paths {
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
         s.validate()?;
         self.write("settings.json", s)
+            .map_err(|_| anyhow::anyhow!("Не удалось сохранить настройки Proxywatch"))
+    }
+    pub fn read_snapshot(&self) -> Result<State> {
+        let path = self.directory.join("state.sqlite3");
+        if path.try_exists()? {
+            let connection =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.busy_timeout(Duration::from_secs(5))?;
+            let version: u32 =
+                connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            ensure!(version <= 1, "Неизвестная версия базы SQLite");
+            if version == 1 {
+                let snapshot: String =
+                    connection.query_row("SELECT data FROM snapshot WHERE id = 1", [], |row| {
+                        row.get(0)
+                    })?;
+                return Ok(serde_json::from_str(&snapshot)?);
+            }
+        }
+        Ok(self.read("state.json")?.unwrap_or_default())
     }
     pub fn load_state(&self) -> Result<State> {
         let mut connection = self.database()?;
@@ -377,7 +402,7 @@ mod tests {
     #[test]
     fn migrates_history_and_pending_once_and_preserves_node_state() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let paths = Paths::open(Some(temp.path().into()))?;
+        let paths = Paths::resolve(Some(temp.path().into()))?;
         let event = serde_json::json!({"at": 1, "kind": "outage", "from": "first", "to": null});
         paths.write(
             "state.json",
@@ -427,7 +452,7 @@ mod tests {
     #[test]
     fn keeps_database_history_beyond_display_window() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let paths = Paths::open(Some(temp.path().into()))?;
+        let paths = Paths::resolve(Some(temp.path().into()))?;
         let mut state = paths.load_state()?;
         for at in 0..=HISTORY_WINDOW as u64 {
             state.history.push(Event {
@@ -450,7 +475,7 @@ mod tests {
     #[test]
     fn failed_transaction_never_partially_advances_state_or_history() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let paths = Paths::open(Some(temp.path().into()))?;
+        let paths = Paths::resolve(Some(temp.path().into()))?;
         let mut state = paths.load_state()?;
         state.status = "changed".into();
         state.history.push(Event {

@@ -1,3 +1,4 @@
+mod automation;
 mod config;
 mod engine;
 mod interface;
@@ -30,12 +31,38 @@ enum Command {
     Run,
     #[command(about = "Открыть настройки и историю")]
     Tui,
+    #[command(about = "Записать настройки из JSON")]
+    Configure {
+        #[arg(
+            long,
+            required = true,
+            help = "Прочитать настройки из стандартного ввода"
+        )]
+        stdin: bool,
+    },
+    #[command(about = "Прочитать последнее сохранённое состояние")]
+    Status {
+        #[arg(long, required = true, help = "Вывести состояние в формате JSON")]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
-    let arguments = Arguments::parse();
-    let paths = storage::Paths::open(arguments.directory)?;
-    match arguments.command.unwrap_or(Command::Tui) {
+    let arguments = Arguments::try_parse().unwrap_or_else(|error| {
+        if error.use_stderr() {
+            eprintln!("Некорректные аргументы. Используйте --help.");
+            std::process::exit(2);
+        }
+        error.exit()
+    });
+    let paths = storage::Paths::resolve(arguments.directory)?;
+    let command = arguments.command.unwrap_or(Command::Tui);
+    if !matches!(command, Command::Status { .. }) {
+        paths.ensure_directory()?;
+    }
+    match command {
+        Command::Status { .. } => automation::status(&paths, std::io::stdout().lock()),
+        Command::Configure { .. } => automation::configure(&paths, std::io::stdin().lock()),
         Command::Run => monitor::run(&paths),
         Command::Tui => interface::run(&paths),
     }

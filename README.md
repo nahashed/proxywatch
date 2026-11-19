@@ -34,6 +34,23 @@ systemctl --user enable --now proxywatch.service
 
 Point your application at the local port. Reopen `proxywatch` to see the active route, node health and event history. Restart the daemon after changing settings. To keep a user service running after logout, enable lingering for that account.
 
+## Automation
+
+Run these commands as the service owner. Supply a settings object on standard input. The file can contain credentials, so restrict its permissions. A minimal example with a placeholder subscription URL is:
+
+```json
+{"subscription_url":"https://example.invalid/subscription"}
+```
+
+```sh
+proxywatch configure --stdin < settings.json
+proxywatch status --json
+```
+
+Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
+
+Status reports the last saved snapshot. It includes a schema version, the configuration flag, the recorded service state, the Unix update timestamp, whether the preferred node is active, and counts for nodes and queued notifications. It also works before the first run. Exit codes are 0 for success, 1 for an operation or configuration error, and 2 for invalid command syntax.
+
 ## What happens when a node fails?
 
 Suppose node A is preferred and B is on standby. By default, Proxywatch checks A every 30 seconds. After three consecutive failures it tries the reserves. If B passes the same check, **new connections use B**. Your application keeps its proxy address, though existing connections may need to reconnect. Once A passes again, **new connections return to A**, even if B is healthy.
