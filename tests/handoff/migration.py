@@ -269,6 +269,7 @@ def verify_system_setup(name):
             wizard.choose("Exit without saving")
             wizard.wait("Enable and start the Proxywatch system service")
             with socket.socket() as late_listener:
+                late_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 late_listener.bind(("127.0.0.1", SOCKS_PORT))
                 late_listener.listen()
                 wizard.send("\r")
