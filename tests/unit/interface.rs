@@ -31,3 +31,15 @@ fn phone_menu_rows_fit_without_losing_full_detail_text() {
     assert!(compact.ends_with('…'));
     assert_eq!(menu_line(label, 100), label);
 }
+
+#[test]
+fn handover_displays_each_listener_with_its_assigned_protocol() {
+    assert_eq!(ports_label(Some(10808), None), "HTTP 127.0.0.1:10808");
+    assert_eq!(ports_label(None, Some(10809)), "SOCKS5 127.0.0.1:10809");
+    assert_eq!(
+        ports_label(Some(10808), Some(10809))
+            .lines()
+            .collect::<Vec<_>>(),
+        ["SOCKS5 127.0.0.1:10809", "HTTP 127.0.0.1:10808"]
+    );
+}

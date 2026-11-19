@@ -98,6 +98,16 @@ macro_rules! text {
     (lock_unavailable) => { "A service is already running in this directory or the lock file is unavailable" };
     (install_signal_handler) => { "Could not install the shutdown handler" };
     (subscription_retry) => { "Could not refresh the subscription. A retry is scheduled." };
+    (handover_changed) => { "The port owner, connections or settings changed. Check the ports again." };
+    (handover_probe) => { "No subscription node passed the service check through a temporary proxy." };
+    (handover_start) => { "Proxywatch could not take the selected ports or pass the service check." };
+    (handover_stop) => { "Could not stop the dedicated Xray service." };
+    (handover_restored) => { "The switch was cancelled. The original Xray service is active." };
+    (handover_restore_failed) => { "Could not confirm that the original service was restored. Check systemctl status xray.service." };
+    (handover_target_stop) => { "Could not stop the new Proxywatch process. Check both services before retrying." };
+    (handover_settings) => { "Could not remove incomplete settings. Check the configuration before retrying." };
+    (handover_foreground) => { "Proxywatch is serving these ports in this terminal. Press Ctrl+C to return them to Xray." };
+    (handover_returned) => { "The original Xray service is active again." };
     (delivery_retry) => { "Notification queued for another delivery attempt." };
 }
 pub(crate) use text;

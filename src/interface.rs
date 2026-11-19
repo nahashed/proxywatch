@@ -60,26 +60,46 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
         ui.screen("Proxywatch")?;
         let state = paths.load_state()?;
         ui.status(&settings, &state)?;
-        match ui.select(
-            tui!(ui.language, action),
-            &[
-                tui!(ui.language, refresh),
-                tui!(ui.language, nodes),
-                tui!(ui.language, history),
-                tui!(ui.language, settings),
-                tui!(ui.language, close),
-            ],
-            0,
-        )? {
+        let mut actions = vec![
+            tui!(ui.language, refresh),
+            tui!(ui.language, nodes),
+            tui!(ui.language, history),
+            tui!(ui.language, settings),
+        ];
+        let listeners = if crate::handover::available(paths, explicit_directory)
+            && !crate::handover::conflicts(&settings).is_empty()
+        {
+            crate::xray_listeners::inspect(settings.http_port, settings.socks_port)
+                .filter(|listeners| !listeners.busy)
+        } else {
+            None
+        };
+        if listeners.is_some() {
+            actions.push(tui!(ui.language, hand_over_ports));
+        }
+        actions.push(tui!(ui.language, close));
+        match ui.select(tui!(ui.language, action), &actions, 0)? {
             Some(0) => (),
             Some(1) => ui.nodes(&state)?,
             Some(2) => ui.history(&settings, &state)?,
             Some(3) => {
-                ui.edit(paths, settings)?;
+                ui.edit(paths, settings, false)?;
+            }
+            Some(4) => {
+                let Some(listeners) = listeners else {
+                    return Ok(());
+                };
+                ui.handover(paths, &settings, &listeners, Some(&settings))?;
             }
             _ => return Ok(()),
         }
     }
+}
+
+enum PortAction {
+    Retry,
+    Edit,
+    Applied,
 }
 
 struct Interface {
@@ -211,14 +231,14 @@ impl Interface {
         }
         self.line(tui!(self.language, notification_intro))?;
         self.notifications(&mut settings)?;
-        self.edit(paths, settings)
+        self.edit(paths, settings, true)
     }
 
-    fn edit(&mut self, paths: &Paths, mut settings: Settings) -> Result<bool> {
+    fn edit(&mut self, paths: &Paths, mut settings: Settings, first_setup: bool) -> Result<bool> {
         loop {
             self.screen(tui!(self.language, settings_title))?;
             self.line(&display_text(&settings.instance_name))?;
-            self.line(&ports_label(&settings))?;
+            self.line(&ports_label(settings.http_port, settings.socks_port))?;
             self.line(&tui!(
                 self.language,
                 check_summary,
@@ -252,7 +272,7 @@ impl Interface {
                         self.pause()?;
                         continue;
                     }
-                    if self.save(paths, &mut settings)? {
+                    if self.save(paths, &mut settings, first_setup)? {
                         return Ok(true);
                     }
                 }
@@ -283,28 +303,34 @@ impl Interface {
         }
     }
 
-    fn save(&self, paths: &Paths, settings: &mut Settings) -> Result<bool> {
+    fn save(&self, paths: &Paths, settings: &mut Settings, first_setup: bool) -> Result<bool> {
         use crate::user_service::{Applied, UserService, foreground_command};
 
-        let service = UserService::installed(paths.directory(), self.explicit_directory);
-        let xray = crate::xray_binary::inspect_binary(&settings.xray_binary);
-        let xray_ready = xray.is_some();
-        if let Some((binary, [major, minor, patch])) = xray {
-            // The service manager can have a different PATH from the interactive shell.
-            if let Some(binary) = binary.to_str() {
-                settings.xray_binary = binary.to_owned();
-            }
-            self.line(&tui!(self.language, xray_detected, major, minor, patch))?;
-        } else {
-            self.line(tui!(self.language, xray_unavailable))?;
-            if service.is_some() {
-                self.pause()?;
-                return Ok(false);
+        if first_setup {
+            loop {
+                let conflicts = crate::handover::conflicts(settings);
+                if conflicts.is_empty() {
+                    break;
+                }
+                match self.resolve_port_conflict(paths, settings, &conflicts)? {
+                    PortAction::Retry => continue,
+                    PortAction::Edit => return Ok(false),
+                    PortAction::Applied => return Ok(true),
+                }
             }
         }
 
-        let first_setup = !paths.has_settings();
-        paths.save_settings(settings)?;
+        let service = UserService::installed(paths.directory(), self.explicit_directory);
+        let xray_ready = self.resolve_xray(settings)?;
+        if !xray_ready && service.is_some() {
+            self.pause()?;
+            return Ok(false);
+        }
+        if first_setup {
+            paths.try_first_settings(settings, || Ok(()))?;
+        } else {
+            paths.save_settings(settings)?;
+        }
         let outcome = service.map(|service| service.apply(first_setup));
         match outcome {
             Some(Applied::Started) => self.line(tui!(self.language, service_started))?,
@@ -331,6 +357,121 @@ impl Interface {
             self.pause()?;
         }
         Ok(true)
+    }
+
+    fn resolve_xray(&self, settings: &mut Settings) -> Result<bool> {
+        let Some((binary, [major, minor, patch])) =
+            crate::xray_binary::inspect_binary(&settings.xray_binary)
+        else {
+            self.line(tui!(self.language, xray_unavailable))?;
+            return Ok(false);
+        };
+        // The service manager can have a different PATH from the interactive shell.
+        if let Some(binary) = binary.to_str() {
+            settings.xray_binary = binary.to_owned();
+        }
+        self.line(&tui!(self.language, xray_detected, major, minor, patch))?;
+        Ok(true)
+    }
+
+    fn resolve_port_conflict(
+        &self,
+        paths: &Paths,
+        settings: &mut Settings,
+        conflicts: &[u16],
+    ) -> Result<PortAction> {
+        self.screen(tui!(self.language, ports_in_use))?;
+        for port in conflicts {
+            self.line(&tui!(self.language, occupied_address, port))?;
+        }
+        let mut choices = vec![
+            tui!(self.language, change_ports),
+            tui!(self.language, retry_ports),
+            tui!(self.language, return_to_settings),
+        ];
+        let inspected = if crate::handover::available(paths, self.explicit_directory) {
+            let inspected = crate::xray_listeners::inspect(settings.http_port, settings.socks_port);
+            if let Some(listeners) = &inspected {
+                self.line(&tui!(self.language, detected_listeners, listeners.pid))?;
+                self.line(&ports_label(listeners.http, listeners.socks))?;
+                if listeners.busy {
+                    self.line(tui!(self.language, listeners_busy))?;
+                } else {
+                    choices.push(tui!(self.language, test_handover));
+                }
+            } else {
+                self.line(tui!(self.language, unknown_listeners))?;
+            }
+            inspected
+        } else {
+            None
+        };
+        match self.select(tui!(self.language, action), &choices, 0)? {
+            Some(0) => {
+                self.ports(settings)?;
+                Ok(PortAction::Edit)
+            }
+            Some(1) => Ok(PortAction::Retry),
+            Some(3) => {
+                if let Some(listeners) = inspected.filter(|item| !item.busy) {
+                    return self.handover(paths, settings, &listeners, None);
+                }
+                Ok(PortAction::Edit)
+            }
+            _ => Ok(PortAction::Edit),
+        }
+    }
+
+    fn handover(
+        &self,
+        paths: &Paths,
+        settings: &Settings,
+        listeners: &crate::xray_listeners::XrayListeners,
+        expected_settings: Option<&Settings>,
+    ) -> Result<PortAction> {
+        use crate::handover::{StartMode, cutover, verify_route};
+        use crate::user_service::UserService;
+
+        let mut candidate = settings.clone();
+        candidate.http_port = listeners.http;
+        candidate.socks_port = listeners.socks;
+        if !self.resolve_xray(&mut candidate)? {
+            self.pause()?;
+            return Ok(PortAction::Edit);
+        }
+        self.line(tui!(self.language, checking_handover))?;
+        if let Err(error) = verify_route(&candidate) {
+            self.line(&error.to_string())?;
+            self.pause()?;
+            return Ok(PortAction::Edit);
+        }
+        self.line(tui!(self.language, route_verified))?;
+        self.line(&ports_label(candidate.http_port, candidate.socks_port))?;
+        let user_service =
+            UserService::installed(paths.directory(), self.explicit_directory).is_some();
+        let mode = if user_service {
+            self.line(tui!(self.language, handover_user_service))?;
+            StartMode::UserService
+        } else {
+            self.line(tui!(self.language, handover_foreground))?;
+            StartMode::Foreground
+        };
+        self.line(tui!(self.language, rollback_notice))?;
+        if !self.confirm(tui!(self.language, confirm_handover), false)? {
+            return Ok(PortAction::Edit);
+        }
+        if let Err(error) = cutover(paths, &candidate, listeners, mode, expected_settings) {
+            self.line(&error.to_string())?;
+            self.pause()?;
+            return Ok(PortAction::Edit);
+        }
+        if user_service {
+            self.line(tui!(self.language, handover_started))?;
+        }
+        if !self.installer_setup {
+            self.pause()?;
+        }
+        Ok(PortAction::Applied)
     }
 
     fn subscription(&self, settings: &mut Settings) -> Result<()> {
@@ -605,7 +746,7 @@ impl Interface {
 
     fn status(&self, settings: &Settings, state: &State) -> Result<()> {
         self.line(&display_text(&settings.instance_name))?;
-        self.line(&ports_label(settings))?;
+        self.line(&ports_label(settings.http_port, settings.socks_port))?;
         if state.updated_at == 0 {
             self.line(tui!(self.language, no_state))?;
             return Ok(());
@@ -802,12 +943,12 @@ fn menu_line(text: &str, width: u16) -> String {
     truncate_str(text, usize::from(width.saturating_sub(4)).max(1), "…").into_owned()
 }
 
-fn ports_label(settings: &Settings) -> String {
+fn ports_label(http: Option<u16>, socks: Option<u16>) -> String {
     let mut endpoints = Vec::new();
-    if let Some(port) = settings.socks_port {
+    if let Some(port) = socks {
         endpoints.push(format!("SOCKS5 127.0.0.1:{port}"));
     }
-    if let Some(port) = settings.http_port {
+    if let Some(port) = http {
         endpoints.push(format!("HTTP 127.0.0.1:{port}"));
     }
     endpoints.join("\n")

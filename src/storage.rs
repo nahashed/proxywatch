@@ -16,14 +16,14 @@ use tempfile::NamedTempFile;
 
 pub const PRESETS: &[(&str, &str)] = &include!("../data/check-presets.ron");
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Telegram {
     pub token: String,
     pub chat_id: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Smtp {
     pub host: String,
@@ -34,7 +34,7 @@ pub struct Smtp {
     pub to: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub language: crate::i18n::Language,
@@ -262,6 +262,49 @@ impl Paths {
         let _guard = self.lock_settings()?;
         self.write_settings(&update()?)
     }
+    pub fn try_first_settings(
+        &self,
+        settings: &Settings,
+        start: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.with_handover_settings(None, settings, start)
+    }
+
+    // Other TUI/CLI writers must see either the verified configuration or the entire original file.
+    pub fn with_handover_settings(
+        &self,
+        previous: Option<&Settings>,
+        settings: &Settings,
+        start: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let _guard = self.lock_settings()?;
+        let path = self.directory.join("settings.json");
+        ensure!(
+            self.read::<Settings>("settings.json")?.as_ref() == previous,
+            message!(handover_changed)
+        );
+        let backup = if previous.is_some() {
+            let mut file = NamedTempFile::new_in(&self.directory)?;
+            std::io::copy(&mut File::open(&path)?, file.as_file_mut())?;
+            file.as_file().sync_all()?;
+            Some(file)
+        } else {
+            None
+        };
+        let attempt = self.write_settings(settings).and_then(|()| start());
+        if attempt.is_err() {
+            if let Some(original) = backup {
+                original
+                    .persist(path)
+                    .map_err(|_| anyhow::anyhow!(message!(handover_settings)))?;
+            } else if path.try_exists()? {
+                fs::remove_file(path).context(message!(handover_settings))?;
+            }
+            File::open(&self.directory)?.sync_all()?;
+        }
+        attempt
+    }
+
     fn lock_settings(&self) -> Result<File> {
         // Replacing settings.json changes its inode. The directory lock survives the rename.
         let directory = File::open(&self.directory).context(message!(open_directory))?;
@@ -385,6 +428,44 @@ impl Paths {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn failed_handover_restores_the_exact_file_and_rejects_a_stale_draft() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::resolve(Some(dir.path().to_owned()))?;
+        let previous = Settings {
+            subscription_url: "https://example.invalid/previous".into(),
+            ..Settings::default()
+        };
+        let mut candidate = previous.clone();
+        candidate.socks_port = None;
+        let reject = || Err(anyhow::anyhow!("simulated startup failure"));
+        assert!(
+            paths
+                .with_handover_settings(None, &candidate, reject)
+                .is_err()
+        );
+        assert!(!paths.has_settings());
+        let original = serde_json::to_vec_pretty(&previous)?;
+        fs::write(dir.path().join("settings.json"), &original)?;
+        assert!(
+            paths
+                .with_handover_settings(Some(&candidate), &candidate, || panic!(
+                    "stale configuration"
+                ))
+                .is_err()
+        );
+        assert!(
+            paths
+                .with_handover_settings(Some(&previous), &candidate, || {
+                    assert!(paths.load_settings()?.socks_port.is_none());
+                    reject()
+                })
+                .is_err()
+        );
+        assert_eq!(fs::read(dir.path().join("settings.json"))?, original);
+        Ok(())
+    }
 
     #[test]
     fn upgrades_legacy_settings_with_instance_name_and_independent_reserve_interval() -> Result<()>

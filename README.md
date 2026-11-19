@@ -35,6 +35,14 @@ Updates preserve settings and the database. An identical release leaves the inst
 
 Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 
+### Reusing ports from an existing Xray
+
+Enter the new subscription in setup and select the loopback ports your applications already use. Free ports work alongside your existing service. During first setup as root, an installed Proxywatch can also offer to take over the ports of a dedicated system `xray.service`. The wizard identifies HTTP and SOCKS5 from Xray's running configuration and verifies which process owns the listeners. It keeps each protocol on its original port.
+
+Choose the transfer to test the new subscription through a temporary proxy while Xray continues serving clients. After a successful check, the wizard asks for permission to stop the service and checks again for active connections. There is a short interruption during the switch. If the new route fails its checks on the requested ports, Proxywatch attempts to restore Xray. If ownership is uncertain, the service has other listeners, or the existing endpoints require authentication or UDP, choose different ports or migrate them manually.
+
+The transfer leaves boot settings intact. A user service started this way runs for the current session. To switch back, stop that Proxywatch service and start the system `xray.service`. In foreground transfer mode, Ctrl+C returns the ports to Xray automatically. To transfer them again with saved settings, open `proxywatch` (or `pwch`) and choose **Hand over Xray ports**.
+
 ## CLI for scripts and agents
 
 Run these commands as the account that owns the configuration. Restrict access to files containing credentials.

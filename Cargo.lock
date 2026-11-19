@@ -1074,6 +1074,7 @@ dependencies = [
  "fs2",
  "hostname",
  "lettre",
+ "nix",
  "rcgen",
  "reqwest",
  "ring",

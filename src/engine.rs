@@ -88,6 +88,10 @@ impl Engine {
         }
     }
 
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn probe(&self, address: &str, timeout: Duration) -> Result<()> {
         let url = Url::parse(address).map_err(|_| anyhow::anyhow!(message!(invalid_probe_url)))?;
         ensure!(

@@ -100,6 +100,35 @@ impl<'a> UserService<'a> {
         })
     }
 
+    pub(crate) fn stopped(&self) -> bool {
+        self.control(&["show", "--property=ActiveState", "--value", UNIT])
+            .is_some_and(|output| {
+                output.stdout.trim_ascii() == b"inactive" || output.stdout.trim_ascii() == b"failed"
+            })
+    }
+
+    pub(crate) fn start(&self) -> bool {
+        self.control(&["start", UNIT]).is_some()
+    }
+
+    pub(crate) fn stop(&self) -> bool {
+        self.control(&["stop", UNIT]).is_some()
+    }
+
+    pub(crate) fn pid(&self) -> Option<u32> {
+        let info = self.control(&["show", "--property=MainPID", "--value", UNIT])?;
+        std::str::from_utf8(&info.stdout)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+            .filter(|pid| *pid > 0)
+    }
+
+    fn control(&self, args: &[&str]) -> Option<Output> {
+        invoke(self.systemctl, &self.runtime, args)
+    }
+
     pub fn apply(&self, first_setup: bool) -> Applied {
         let (args, success) = if first_setup {
             (&["enable", "--now", UNIT][..], Applied::Started)
