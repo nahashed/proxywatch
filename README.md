@@ -31,7 +31,7 @@ Updates preserve settings and the database. An identical release leaves the inst
 
 1. Interactive installation opens setup for the invoking account whenever its settings are missing, including after an interrupted install. You can reopen it with `proxywatch`. Choose a language, name the installation, enter the subscription URL, and choose a URL that your applications need to reach.
 2. Choose the local protocols and ports. If another Xray already listens on your preferred port, test Proxywatch on a free port first. To reuse the original address, free that listener before switching. Optionally configure Telegram, SMTP, or subscription device identification.
-3. Save the settings. On a system with an available systemd user manager, Proxywatch enables and starts its installed user service. In a console without a user manager (for example, some Proxmox `pct enter` sessions), the installer still completes. After saving, you can start Proxywatch in that terminal. It runs until you press Ctrl+C or close the session. Point your application at the chosen local endpoint.
+3. Save your settings. In a root console without a systemd user manager, Proxywatch enables the system service `proxywatch.service` for the configuration in `/root/.config/proxywatch`. It keeps running after you close the terminal. Check it with `systemctl status proxywatch.service`. In a regular user session, setup uses that account’s user service. When systemd is unavailable, setup offers to run Proxywatch in the terminal. Point your application at the chosen local endpoint.
 
 Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 
@@ -43,7 +43,7 @@ Enter the new subscription in setup and select the loopback ports your applicati
 
 Choose the transfer to test the new subscription through a temporary proxy while Xray continues serving clients. After a successful check, the wizard asks for permission to stop the service and checks again for active connections. There is a short interruption during the switch. If the new route fails its checks on the requested ports, Proxywatch attempts to restore Xray. If ownership is uncertain, the service has other listeners, or the existing endpoints require authentication or UDP, choose different ports or migrate them manually.
 
-The transfer leaves boot settings intact. A user service started this way runs for the current session. To switch back, stop that Proxywatch service and start the system `xray.service`. In foreground transfer mode, Ctrl+C returns the ports to Xray automatically. To transfer them again with saved settings, open `proxywatch` (or `pwch`) and choose **Hand over Xray ports**.
+The transfer preserves both services’ boot settings. If the original `xray.service` is enabled, it can reclaim the ports on reboot. To switch back, stop the corresponding Proxywatch service and start the system `xray.service`. In foreground transfer mode, Ctrl+C returns the ports to Xray automatically. To transfer them again with saved settings, open `proxywatch` (or `pwch`) and choose **Hand over Xray ports**.
 
 ## CLI for scripts and agents
 

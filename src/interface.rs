@@ -311,7 +311,7 @@ impl Interface {
     }
 
     fn save(&self, paths: &Paths, settings: &mut Settings, first_setup: bool) -> Result<bool> {
-        use crate::user_service::{Applied, UserService, foreground_command};
+        use crate::user_service::{Applied, Scope, UserService, foreground_command};
 
         if first_setup {
             loop {
@@ -338,11 +338,50 @@ impl Interface {
         } else {
             paths.save_settings(settings)?;
         }
-        let outcome = service.map(|service| service.apply(first_setup));
+        let outcome = if let Some(service) = service {
+            let scope = service.scope();
+            let mut applied = service.apply(first_setup);
+            let can_enable = || {
+                service.inactive_disabled()
+                    && paths.lock().is_ok()
+                    && crate::handover::conflicts(settings).is_empty()
+            };
+            if matches!(applied, Applied::Inactive)
+                && scope == Scope::System
+                && can_enable()
+                && self.confirm(tui!(self.language, enable_system_service), true)?
+            {
+                if !can_enable() {
+                    self.line(tui!(self.language, system_start_changed))?;
+                    self.pause()?;
+                    return Ok(true);
+                }
+                applied = service.apply(true);
+            }
+            Some((scope, applied))
+        } else {
+            None
+        };
         match outcome {
-            Some(Applied::Started) => self.line(tui!(self.language, service_started))?,
-            Some(Applied::Restarted) => self.line(tui!(self.language, service_restarted))?,
-            Some(Applied::Failed) => self.line(tui!(self.language, service_failed))?,
+            Some((scope, Applied::Started)) => self.line(&tui!(
+                self.language,
+                service_started,
+                service_label(self.language, scope)
+            ))?,
+            Some((scope, Applied::Restarted)) => self.line(&tui!(
+                self.language,
+                service_restarted,
+                service_label(self.language, scope)
+            ))?,
+            Some((scope, Applied::Failed)) => self.line(&tui!(
+                self.language,
+                service_failed,
+                service_label(self.language, scope),
+                match scope {
+                    Scope::User => "systemctl --user status proxywatch.service",
+                    Scope::System => "systemctl --system status proxywatch.service",
+                }
+            ))?,
             None if self.installer_setup && first_setup && xray_ready => {
                 self.line(tui!(self.language, saved_without_service))?;
                 if self.confirm(tui!(self.language, run_in_terminal), false)? {
@@ -354,7 +393,7 @@ impl Interface {
                 }
                 self.line(&tui!(self.language, run_later, foreground_command(None)))?;
             }
-            Some(Applied::Inactive) | None => {
+            Some((_, Applied::Inactive)) | None => {
                 let command =
                     foreground_command(self.explicit_directory.then_some(paths.directory()));
                 self.line(&tui!(self.language, saved_foreground, command))?;
@@ -437,8 +476,6 @@ impl Interface {
         expected_settings: Option<&Settings>,
     ) -> Result<PortAction> {
         use crate::handover::{StartMode, cutover, verify_route};
-        use crate::user_service::UserService;
-
         let mut candidate = settings.clone();
         candidate.http_port = listeners.http;
         candidate.socks_port = listeners.socks;
@@ -446,6 +483,7 @@ impl Interface {
             self.pause()?;
             return Ok(PortAction::Edit);
         }
+        let mode = StartMode::detect(paths, self.explicit_directory);
         self.line(tui!(self.language, checking_handover))?;
         if let Err(error) = verify_route(&candidate) {
             self.line(&error.to_string())?;
@@ -454,15 +492,19 @@ impl Interface {
         }
         self.line(tui!(self.language, route_verified))?;
         self.line(&ports_label(candidate.http_port, candidate.socks_port))?;
-        let user_service =
-            UserService::installed(paths.directory(), self.explicit_directory).is_some();
-        let mode = if user_service {
-            self.line(tui!(self.language, handover_user_service))?;
-            StartMode::UserService
-        } else {
-            self.line(tui!(self.language, handover_foreground))?;
-            StartMode::Foreground
-        };
+        if StartMode::detect(paths, self.explicit_directory) != mode {
+            self.line(tui!(self.language, manager_changed))?;
+            self.pause()?;
+            return Ok(PortAction::Edit);
+        }
+        match mode {
+            StartMode::Service(scope) => self.line(&tui!(
+                self.language,
+                handover_service,
+                service_label(self.language, scope)
+            ))?,
+            StartMode::Foreground => self.line(tui!(self.language, handover_foreground))?,
+        }
         self.line(tui!(self.language, rollback_notice))?;
         if !self.confirm(tui!(self.language, confirm_handover), false)? {
             return Ok(PortAction::Edit);
@@ -472,8 +514,12 @@ impl Interface {
             self.pause()?;
             return Ok(PortAction::Edit);
         }
-        if user_service {
-            self.line(tui!(self.language, handover_started))?;
+        if let StartMode::Service(scope) = mode {
+            self.line(&tui!(
+                self.language,
+                handover_started,
+                service_label(self.language, scope)
+            ))?;
         }
         if !self.installer_setup {
             self.pause()?;
@@ -1005,6 +1051,13 @@ impl Interface {
             }
         }
         self.pause()
+    }
+}
+
+fn service_label(language: Language, scope: crate::user_service::Scope) -> &'static str {
+    match scope {
+        crate::user_service::Scope::User => tui!(language, user_scope),
+        crate::user_service::Scope::System => tui!(language, system_scope),
     }
 }
 

@@ -20,6 +20,7 @@ id=$(docker create --pull=never --platform "$platform" --network none --privileg
     --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
     -v "$binary:/fixture/proxywatch:ro" -v "$archive:/fixture/xray.zip:ro" \
     -v "$tests/../deploy/proxywatch.service:/fixture/proxywatch.service:ro" \
+    -v "$tests/../deploy/system/proxywatch.service:/fixture/proxywatch-system.service:ro" \
     -v "$tests/handoff:/fixture/test:ro" --entrypoint /bin/sh "$image" -ec '
     for unit in systemd-binfmt.service proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount; do
         ln -sfn /dev/null "/etc/systemd/system/$unit"

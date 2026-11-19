@@ -26,9 +26,10 @@ mkdir -- "$stage/assets"
 install -m 755 "$source_root/install.sh" "$stage/assets/install.sh"
 for arch in x86_64 aarch64; do
     name=proxywatch-$version-linux-$arch
-    mkdir -p -- "$stage/$name/deploy"
+    mkdir -p -- "$stage/$name/deploy/system"
     install -m 755 "$input/proxywatch-$arch" "$stage/$name/proxywatch"
     install -m 644 "$source_root/deploy/proxywatch.service" "$stage/$name/deploy/"
+    install -m 644 "$source_root/deploy/system/proxywatch.service" "$stage/$name/deploy/system/"
     install -m 644 "$source_root"/{LICENSE,README.md,README.ru.md} "$stage/$name/"
     tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
         -C "$stage" -cf - "$name" | gzip -n >"$stage/assets/$name.tar.gz"

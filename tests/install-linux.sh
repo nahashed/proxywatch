@@ -12,6 +12,7 @@ cd /release
 sha256sum -c SHA256SUMS
 binary=/usr/local/bin/proxywatch
 unit=/usr/local/lib/systemd/user/proxywatch.service
+system_unit=/usr/local/lib/systemd/system/proxywatch.service
 # An executable on the invoking user's PATH must never run under installer privileges.
 mkdir /tmp/user-bin
 cat > /tmp/user-bin/xray <<'XRAY'
@@ -51,6 +52,11 @@ rm "$private_xray"
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 [[ $(pwch --version) == "$(proxywatch --version)" ]]
 test -s "$unit"
+if tar -tzf "/release/$archive" "${archive%.tar.gz}/deploy/system/proxywatch.service" >/dev/null 2>&1; then
+    tar -xOzf "/release/$archive" "${archive%.tar.gz}/deploy/system/proxywatch.service" | cmp - "$system_unit"
+else
+    test ! -e "$system_unit"
+fi
 test ! -e /root/.config/proxywatch
 mkdir -p /root/.config/proxywatch
 cd /root/.config/proxywatch
@@ -167,6 +173,96 @@ for change in unchanged update; do
 done
 output=$(SUDO_UID=65534 script -qec 'bash /release/install.sh --from /tmp/previous --version v0.0.0 --non-interactive' /dev/null </dev/null)
 [[ $output == *'Setup is pending'* && $output != *'wizard-uid'* ]]
+
+# Exercise installer decisions without a real bus. A release ELF invokes this fixture only
+# when the installer delegates checked activation to the packaged Proxywatch command.
+rm /run/user/0/bus
+mkdir -p /run/systemd/system /tmp/system-release
+cd /tmp/system-release
+next=proxywatch-9.8.7-linux-$(uname -m)
+mkdir -p "$next/deploy/system"
+cp /bin/bash "$next/proxywatch"
+cp "$unit" "$next/deploy/proxywatch.service"
+printf '[Service]\nExecStart=/usr/local/bin/proxywatch run\n' > "$next/deploy/system/proxywatch.service"
+tar -czf "$next.tar.gz" "$next"
+sha256sum "$next.tar.gz" > SHA256SUMS
+cat > activate-system-service <<'ACTIVATE'
+test "$(id -u)" = 0 && test "$HOME:$XDG_CONFIG_HOME" = /root:/root/.config && test ! -t 0 || exit 1
+echo activate >> /tmp/system-actions
+ACTIVATE
+cat > /usr/bin/systemctl <<'SYSTEM'
+#!/bin/sh
+test "$1 $2" = '--system --no-ask-password' || exit 2
+shift 2
+case "$1" in
+    is-active) test -e /tmp/system-active ;;
+    is-enabled) if test -e /tmp/system-enabled; then echo enabled; else echo disabled; exit 1; fi ;;
+    show)
+        case "$2" in
+            --property=FragmentPath) cat /tmp/system-fragment ;;
+            --property=Names) echo proxywatch.service ;;
+            --property=DropInPaths) if test -e /tmp/system-override; then echo example.conf; fi ;;
+            *) exit 2 ;;
+        esac ;;
+    daemon-reload|try-restart) echo "$*" >> /tmp/system-actions ;;
+    *) exit 2 ;;
+esac
+SYSTEM
+changed_system() { bash /release/install.sh --from /tmp/system-release --version v9.8.7 --non-interactive; }
+rm -f "$system_unit" /usr/local/lib/proxywatch/system-unit.sha256
+echo "$system_unit" > /tmp/system-fragment
+: > /tmp/system-actions
+bash /release/install.sh --from /tmp/previous --version v0.0.0 --non-interactive
+test ! -e "$system_unit" && test ! -s /tmp/system-actions
+changed_system
+[[ $(cat /tmp/system-actions) == $'daemon-reload\nactivate' ]]
+system_stat=$(stat -c '%i %y' "$system_unit")
+: > /tmp/system-actions
+changed_system
+[[ ! -s /tmp/system-actions && $(stat -c '%i %y' "$system_unit") == "$system_stat" ]]
+touch /tmp/system-enabled
+changed_system
+[[ $(cat /tmp/system-actions) == activate ]]
+touch /tmp/system-active
+: > /tmp/system-actions
+install /bin/true "$binary"
+changed_system
+[[ $(cat /tmp/system-actions) == $'daemon-reload\ntry-restart proxywatch.service' ]]
+: > /tmp/system-actions
+changed_system
+[[ ! -s /tmp/system-actions ]]
+for custom in fragment override; do
+    if [[ $custom == fragment ]]; then echo /etc/systemd/system/proxywatch.service > /tmp/system-fragment
+    else echo "$system_unit" > /tmp/system-fragment; touch /tmp/system-override; fi
+    install /bin/true "$binary"
+    changed_system
+    [[ ! -s /tmp/system-actions ]]
+done
+rm /tmp/system-override
+echo '# administrator edit' >> "$system_unit"
+customized=$(sha256sum "$system_unit")
+install /bin/true "$binary"
+output=$(changed_system)
+[[ $output == *'Preserved the customized system service'* && $(sha256sum "$system_unit") == "$customized" && ! -s /tmp/system-actions ]]
+cp "$next/deploy/system/proxywatch.service" "$system_unit"
+install /bin/true "$binary"
+SUDO_UID=65534 changed_system
+[[ ! -s /tmp/system-actions ]]
+install /bin/true "$binary"
+output=$(bash /release/install.sh --from /tmp/previous --version v0.0.0 --non-interactive)
+[[ $output == *'needs a manual restart'* && ! -s /tmp/system-actions && -f $system_unit ]]
+# A later official definition may replace its own recorded predecessor.
+echo '# next packaged definition' >> "$next/deploy/system/proxywatch.service"
+tar -czf "$next.tar.gz" "$next"
+sha256sum "$next.tar.gz" > SHA256SUMS
+changed_system
+cmp "$next/deploy/system/proxywatch.service" "$system_unit"
+[[ $(cat /tmp/system-actions) == $'daemon-reload\ntry-restart proxywatch.service' ]]
+: > /tmp/system-actions
+mv "$system_unit" /tmp/administrator-service
+ln -s /tmp/administrator-service "$system_unit"
+output=$(changed_system)
+[[ $output == *'Preserved the customized system service'* && $(readlink "$system_unit") == /tmp/administrator-service && ! -s /tmp/system-actions ]]
 printf 'PASS: %s %s\n' "$(uname -m)" "$tag"
 LINUX
 done

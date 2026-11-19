@@ -3,7 +3,7 @@ use crate::{
     runtime_text::message,
     storage::{Paths, Settings},
     subscription,
-    user_service::UserService,
+    user_service::{Scope, UserService},
     xray_listeners::{self, XrayListeners},
 };
 use anyhow::{Result, anyhow, ensure};
@@ -27,10 +27,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum StartMode {
-    UserService,
+    Service(Scope),
     Foreground,
+}
+
+impl StartMode {
+    pub fn detect(paths: &Paths, explicit_directory: bool) -> Self {
+        UserService::installed(paths.directory(), explicit_directory)
+            .map_or(Self::Foreground, |service| Self::Service(service.scope()))
+    }
 }
 
 pub fn available(paths: &Paths, explicit_directory: bool) -> bool {
@@ -147,12 +154,14 @@ enum Target {
 
 impl Target {
     fn prepare(paths: &Paths, mode: StartMode) -> Result<Self> {
-        match mode {
-            StartMode::Foreground => Ok(Self::Terminal(None)),
-            StartMode::UserService => UserService::installed(paths.directory(), false)
-                .filter(|service| service.stopped())
-                .map(Self::Service)
-                .ok_or_else(|| anyhow!(message!(handover_changed))),
+        match (mode, UserService::installed(paths.directory(), false)) {
+            (StartMode::Foreground, None) => Ok(Self::Terminal(None)),
+            (StartMode::Service(expected), Some(service))
+                if service.scope() == expected && service.stopped() =>
+            {
+                Ok(Self::Service(service))
+            }
+            _ => Err(anyhow!(message!(handover_changed))),
         }
     }
 

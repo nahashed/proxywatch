@@ -81,6 +81,11 @@ macro_rules! text {
     (enable_listener) => { "Enable at least one local listener" };
     (different_ports) => { "HTTP and SOCKS5 require distinct ports between 1 and 65535" };
     (invalid_intervals) => { "Check the intervals and failure threshold" };
+    (system_activation_unavailable) => { "Could not select the installed system service. Run proxywatch to review the saved setup." };
+    (system_activation_busy) => { "Settings are saved. The daemon lock or a configured port is in use. Open proxywatch to review the ports and start the service." };
+    (system_activation_xray) => { "Settings are saved. Open proxywatch to select a compatible Xray before starting the system service." };
+    (system_activation_failed) => { "Could not start the Proxywatch system service. Check systemctl status proxywatch.service." };
+    (system_activation_started) => { "The Proxywatch system service is enabled and running with the saved settings." };
     (diagnostic_interval) => { "Set one interval per resource, between 1 and 2592000 seconds" };
     (invalid_diagnostics) => { "Specify the Xray path and up to 16 diagnostic URLs" };
     (telegram_credentials) => { "Telegram requires a bot token and a chat ID" };

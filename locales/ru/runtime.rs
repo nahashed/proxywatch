@@ -81,6 +81,11 @@ macro_rules! text {
     (enable_listener) => { "Выберите хотя бы один локальный вход" };
     (different_ports) => { "HTTP и SOCKS5 требуют разных портов от 1 до 65535" };
     (invalid_intervals) => { "Проверьте интервалы и порог ошибок" };
+    (system_activation_unavailable) => { "Не удалось выбрать установленную системную службу. Откройте proxywatch, чтобы проверить сохранённые настройки." };
+    (system_activation_busy) => { "Настройки сохранены. Процесс уже работает или один из выбранных портов занят. Откройте proxywatch, чтобы проверить порты и запустить службу." };
+    (system_activation_xray) => { "Настройки сохранены. Откройте proxywatch и выберите совместимую версию Xray для запуска системной службы." };
+    (system_activation_failed) => { "Не удалось запустить системную службу Proxywatch. Проверьте её состояние командой systemctl status proxywatch.service." };
+    (system_activation_started) => { "Системная служба Proxywatch включена в автозапуск и работает с сохранёнными настройками." };
     (diagnostic_interval) => { "Задайте для каждого ресурса один интервал от 1 до 2592000 секунд" };
     (invalid_diagnostics) => { "Укажите путь Xray и до 16 диагностических URL" };
     (telegram_credentials) => { "Для Telegram нужны токен и ID чата" };

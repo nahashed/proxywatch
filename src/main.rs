@@ -73,6 +73,8 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    ActivateSystemService,
     #[command(about = text().run, help_template = template("run"))]
     Run,
     #[command(about = text().tui, help_template = template("tui"))]
@@ -149,6 +151,10 @@ fn execute(arguments: Arguments) -> Result<()> {
         Ok(paths)
     };
     match command {
+        Command::ActivateSystemService => {
+            let paths = storage::Paths::resolve(arguments.directory.clone())?;
+            activate_system_service(&paths, arguments.directory.is_some())
+        }
         Command::Help { command } => print_help(command.as_deref()),
         Command::Status { .. } => automation::status(
             &storage::Paths::resolve(arguments.directory)?,
@@ -160,6 +166,40 @@ fn execute(arguments: Arguments) -> Result<()> {
         Command::Run => monitor::run(&writable_paths()?),
         Command::Tui => interface::run(&writable_paths()?, arguments.directory.is_some()),
     }
+}
+
+// The installer also reaches this entry point when a previous version saved settings
+// in a root console but could not start a service there.
+fn activate_system_service(paths: &storage::Paths, explicit_directory: bool) -> Result<()> {
+    use runtime_text::message;
+    use user_service::{Applied, Scope, UserService};
+    if !paths.has_settings() {
+        return Ok(());
+    }
+    let Some(service) = UserService::installed(paths.directory(), explicit_directory)
+        .filter(|service| service.scope() == Scope::System)
+    else {
+        eprintln!("{}", message!(system_activation_unavailable));
+        return Ok(());
+    };
+    if !service.stopped() {
+        return Ok(());
+    }
+    let settings = paths.load_settings()?;
+    if paths.lock().is_err() || !handover::conflicts(&settings).is_empty() {
+        eprintln!("{}", message!(system_activation_busy));
+        return Ok(());
+    }
+    if xray_binary::inspect_binary(&settings.xray_binary).is_none() {
+        eprintln!("{}", message!(system_activation_xray));
+        return Ok(());
+    }
+    anyhow::ensure!(
+        matches!(service.apply(true), Applied::Started),
+        message!(system_activation_failed)
+    );
+    println!("{}", message!(system_activation_started));
+    Ok(())
 }
 
 fn print_help(command: Option<&str>) -> Result<()> {

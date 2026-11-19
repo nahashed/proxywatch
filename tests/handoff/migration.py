@@ -79,8 +79,8 @@ def through(protocol, port):
         return response.read() if response.status == 200 else None
 
 
-def verify_traffic(expected):
-    for protocol, port in [("http", HTTP_PORT), ("socks", SOCKS_PORT)]:
+def verify_traffic(expected, http_port=HTTP_PORT, socks_port=SOCKS_PORT):
+    for protocol, port in [("http", http_port), ("socks", socks_port)]:
         wait_for(f"{protocol} port {port} serves {expected!r}", lambda: through(protocol, port) == expected)
 
 
@@ -226,7 +226,6 @@ class Wizard:
                       "Request timeout", "Subscription refresh interval", "Choose resources for additional checks through the proxy?",
                       "Email over a direct SMTP connection", "Exit without saving"]:
             self.choose(label)
-        self.wait("Local ports are in use")
 
 
 def active(unit, user=False):
@@ -241,6 +240,56 @@ def reset():
         subprocess.run(base + ["reset-failed", unit], capture_output=True, timeout=5)
     if SETTINGS.exists():
         shutil.rmtree(SETTINGS)
+
+
+@contextlib.contextmanager
+def packaged_system_unit():
+    fragment = Path("/usr/local/lib/systemd/system/proxywatch.service")
+    run("install", "-Dm644", "/fixture/proxywatch-system.service", str(fragment))
+    run("systemctl", "daemon-reload")
+    try:
+        yield
+    finally:
+        run("systemctl", "disable", "--now", "proxywatch.service")
+        fragment.unlink()
+        run("systemctl", "daemon-reload")
+
+
+def verify_system_setup(name):
+    if name == "system-saved":
+        # A configuration written by 0.1.1 while the root user manager was unavailable.
+        SETTINGS.mkdir(mode=0o700, parents=True)
+        (SETTINGS / "settings.json").write_text(json.dumps({
+            "language": "en", "instance_name": "Existing root setup",
+            "subscription_url": f"http://127.0.0.1:{DIRECT}/sub", "check_url": TARGET,
+            "diagnostic_urls": [], "xray_binary": XRAY,
+        }))
+        with Wizard() as wizard:
+            wizard.choose("Close menu", "jjj\r")
+            wizard.choose("Exit without saving")
+            wizard.wait("Enable and start the Proxywatch system service")
+            with socket.socket() as late_listener:
+                late_listener.bind(("127.0.0.1", SOCKS_PORT))
+                late_listener.listen()
+                wizard.send("\r")
+                wizard.wait("The service or ports changed")
+                assert not active("proxywatch.service")
+                assert enabled("proxywatch.service") == "disabled"
+                assert late_listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+    with Wizard() as wizard:
+        if name == "system-first-save":
+            wizard.first_save()
+        else:
+            wizard.choose("Close menu", "jjj\r")
+            wizard.choose("Exit without saving")
+            wizard.choose("Enable and start the Proxywatch system service")
+        wizard.wait("The Proxywatch system service is enabled and running")
+    # The terminal is closed. The system service still owns both configured listeners.
+    assert enabled("proxywatch.service") == "enabled"
+    assert active("proxywatch.service")
+    assert not active("user@0.service")
+    settings = json.loads((SETTINGS / "settings.json").read_bytes())
+    verify_traffic(b"upstream", settings["http_port"], settings["socks_port"])
 
 
 def scenario(name, upstream_config):
@@ -262,9 +311,15 @@ def scenario(name, upstream_config):
                 upstream.wait(timeout=5)
         stack.callback(stop_upstream)
         wait_for("local Hysteria2 fixture to listen", upstream_ready)
-        if name == "foreground":
+        if name in ("foreground", "manager-change") or name.startswith("system-"):
             run("systemctl", "stop", "user@0.service")
             stack.callback(run, "systemctl", "start", "user@0.service")
+        if name.startswith("system-"):
+            stack.enter_context(packaged_system_unit())
+        if name in ("system-first-save", "system-saved"):
+            verify_system_setup(name)
+            print(f"PASS system service: {name}", flush=True)
+            return
         foreign = name == "foreign"
         if foreign:
             other = stack.enter_context(socket.socket())
@@ -283,6 +338,7 @@ def scenario(name, upstream_config):
 
         with Wizard() as wizard:
             wizard.first_save()
+            wizard.wait("Local ports are in use")
             wizard.wait("Return to settings")
             takeover = "Test the subscription for handover"
             if name in ("busy", "extra", "foreign"):
@@ -313,6 +369,11 @@ def scenario(name, upstream_config):
                 wizard.wait("Temporarily stop xray.service")
                 assert property_of("xray.service", "InvocationID") == original
                 assert Fixture.requests[DIRECT, "/sub"] and Fixture.requests[UPSTREAM, "/health"]
+                if name == "manager-change":
+                    assert b"Proxywatch will run in this terminal" in wizard.log
+                    run("systemctl", "start", "user@0.service")
+                if name == "system-handover":
+                    assert b"Proxywatch will run as the system service" in wizard.log
                 if name == "late-client":
                     connection = stack.enter_context(socket.create_connection(("127.0.0.1", SOCKS_PORT), timeout=2))
                     assert connect_socks(connection)
@@ -321,7 +382,12 @@ def scenario(name, upstream_config):
                 if condition:
                     condition.unlink()
                 wizard.send("k\r")
-                if name == "late-client":
+                if name == "manager-change":
+                    wizard.wait("The port owner, connections or settings changed.")
+                    assert property_of("xray.service", "InvocationID") == original
+                    assert not (SETTINGS / "settings.json").exists()
+                    verify_traffic(b"direct")
+                elif name == "late-client":
                     wizard.wait("The port owner, connections or settings changed.")
                     assert property_of("xray.service", "InvocationID") == original
                     assert not (SETTINGS / "settings.json").exists()
@@ -347,7 +413,8 @@ def scenario(name, upstream_config):
                     if name == "foreground":
                         wizard.wait("Press Ctrl+C to return them to Xray.")
                     else:
-                        wizard.wait("The Proxywatch user service is running")
+                        scope = "system" if name == "system-handover" else "user"
+                        wizard.wait(f"The Proxywatch {scope} service is running")
                     # Probing earlier would itself create a client during the ownership recheck.
                     verify_traffic(b"upstream")
                     assert property_of("xray.service", "ActiveState") == "inactive"
@@ -356,8 +423,9 @@ def scenario(name, upstream_config):
                         wizard.wait("The original Xray service is active again.")
                         verify_traffic(b"direct")
                     else:
-                        assert active("proxywatch.service", user=True)
-                        assert enabled("proxywatch.service", user=True) == "disabled"
+                        user = name != "system-handover"
+                        assert active("proxywatch.service", user=user)
+                        assert enabled("proxywatch.service", user=user) == "disabled"
                     settings = json.loads((SETTINGS / "settings.json").read_bytes())
                     assert (settings["http_port"], settings["socks_port"]) == (HTTP_PORT, SOCKS_PORT)
         if name == "foreground":
@@ -386,7 +454,8 @@ def main():
         raise SystemExit("The test requires a loopback-only network")
     with contextlib.ExitStack() as stack:
         config = start_fixtures(stack)
-        scenarios = ("busy", "foreign", "extra", "probe-failure", "late-client", "success", "rollback", "restore-failed", "foreground")
+        scenarios = ("busy", "foreign", "extra", "probe-failure", "late-client", "success", "rollback", "restore-failed", "foreground",
+                     "manager-change", "system-handover", "system-first-save", "system-saved")
         for name in sys.argv[1:] or scenarios:
             if name not in scenarios:
                 raise ValueError(f"Unknown scenario: {name}")

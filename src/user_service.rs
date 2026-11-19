@@ -10,7 +10,15 @@ use std::{
 
 const PROGRAM: &str = "/usr/local/bin/proxywatch";
 const UNIT: &str = "proxywatch.service";
-const FRAGMENT: &str = "/usr/local/lib/systemd/user/proxywatch.service";
+const USER_FRAGMENT: &str = "/usr/local/lib/systemd/user/proxywatch.service";
+const SYSTEM_FRAGMENT: &str = "/usr/local/lib/systemd/system/proxywatch.service";
+const ROOT_DIRECTORY: &str = "/root/.config/proxywatch";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Scope {
+    User,
+    System,
+}
 
 pub enum Applied {
     Started,
@@ -20,9 +28,41 @@ pub enum Applied {
 }
 
 pub struct UserService<'a> {
+    installation: Installation<'a>,
+    scope: Scope,
+}
+
+struct Installation<'a> {
     systemctl: &'a Path,
     runtime: PathBuf,
+    directory: PathBuf,
+    uid: u32,
+    user_fragment: &'a Path,
+    system_fragment: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy)]
+struct State {
     active: bool,
+    failed: bool,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Candidate {
+    Missing,
+    Foreign { claimed: bool },
+    Verified(State),
+}
+
+impl Candidate {
+    fn claimed(self) -> bool {
+        match self {
+            Self::Missing => false,
+            Self::Foreign { claimed } => claimed,
+            Self::Verified(state) => state.active || state.enabled,
+        }
+    }
 }
 
 impl UserService<'static> {
@@ -34,85 +74,192 @@ impl UserService<'static> {
             return None;
         }
         let uid = fs::metadata("/proc/self").ok()?.uid();
-        let runtime = PathBuf::from(format!("/run/user/{uid}"));
-        if !has_owner_socket(&runtime, uid) {
-            return None;
-        }
-        Self::discover(
-            Path::new("/usr/bin/systemctl"),
-            directory,
-            Path::new(FRAGMENT),
-            &runtime,
-        )
+        Self::discover(Installation {
+            systemctl: Path::new("/usr/bin/systemctl"),
+            runtime: PathBuf::from(format!("/run/user/{uid}")),
+            directory: directory.to_owned(),
+            uid,
+            user_fragment: Path::new(USER_FRAGMENT),
+            system_fragment: (uid == 0 && directory == Path::new(ROOT_DIRECTORY))
+                .then(|| Path::new(SYSTEM_FRAGMENT)),
+        })
     }
 }
 
-impl<'a> UserService<'a> {
-    fn discover(
-        systemctl: &'a Path,
-        directory: &Path,
-        fragment: &Path,
-        runtime: &Path,
-    ) -> Option<Self> {
-        let control = |args: &[&str]| invoke(systemctl, runtime, args);
-        let environment = control(&["show-environment"])?;
-        // A shell and its user manager can resolve XDG_CONFIG_HOME differently.
-        if manager_directory(&environment.stdout)?
-            .canonicalize()
-            .ok()?
-            != directory.canonicalize().ok()?
-        {
-            return None;
-        }
-        control(&["daemon-reload"])?;
-        let info = control(&[
-            "show",
-            "--all",
-            "-p",
-            "FragmentPath",
-            "-p",
-            "DropInPaths",
-            "-p",
-            "ActiveState",
+impl Installation<'_> {
+    fn probe(&self, scope: Scope, fragment: &Path) -> Candidate {
+        let unknown = Candidate::Foreign { claimed: true };
+        let Some(info) = self.command(scope, &[
+            "show", "--all",
+            "--property=LoadState,FragmentPath,DropInPaths,ActiveState,UnitFileState,NeedDaemonReload",
             UNIT,
-        ])?;
-        let properties = std::str::from_utf8(&info.stdout).ok()?;
+        ]) else {
+            return unknown;
+        };
+        let Ok(properties) = std::str::from_utf8(&info.stdout) else {
+            return unknown;
+        };
         let property = |prefix| {
             properties
                 .lines()
                 .find_map(|line| line.strip_prefix(prefix))
         };
-        if !property("DropInPaths=")?.is_empty()
-            || Path::new(property("FragmentPath=")?).canonicalize().ok()?
-                != fragment.canonicalize().ok()?
-            || fs::read(fragment).ok()? != include_bytes!("../deploy/proxywatch.service")
+        if property("LoadState=") == Some("not-found")
+            && matches!(property("ActiveState="), Some("inactive" | "failed"))
         {
-            return None;
+            return Candidate::Missing;
         }
-        let active = matches!(
-            property("ActiveState=")?,
-            "active" | "activating" | "reloading"
-        );
+        let (Some(active), Some(enabled)) = (property("ActiveState="), property("UnitFileState="))
+        else {
+            return unknown;
+        };
+        let state = State {
+            active: matches!(active, "active" | "activating" | "reloading"),
+            failed: active == "failed",
+            enabled: matches!(enabled, "enabled" | "enabled-runtime"),
+        };
+        let expected: &[u8] = match scope {
+            Scope::User => include_bytes!("../deploy/proxywatch.service"),
+            Scope::System => include_bytes!("../deploy/system/proxywatch.service"),
+        };
+        if info.status.success()
+            && property("LoadState=") == Some("loaded")
+            && property("DropInPaths=") == Some("")
+            && property("NeedDaemonReload=") == Some("no")
+            && property("FragmentPath=").map(Path::new) == Some(fragment)
+            && fs::symlink_metadata(fragment).is_ok_and(|metadata| metadata.is_file())
+            && fs::read(fragment).is_ok_and(|bytes| bytes == expected)
+            && (state.active || matches!(active, "inactive" | "failed"))
+            && (state.enabled || enabled == "disabled")
+        {
+            Candidate::Verified(state)
+        } else {
+            Candidate::Foreign {
+                claimed: !matches!(active, "inactive" | "failed")
+                    || !matches!(enabled, "disabled" | "masked" | "masked-runtime" | "static"),
+            }
+        }
+    }
+
+    fn user(&self) -> Candidate {
+        if has_owner_socket(&self.runtime, self.uid)
+            && let Some(environment) = self
+                .command(Scope::User, &["show-environment"])
+                .filter(|output| output.status.success())
+        {
+            let user = self.probe(Scope::User, self.user_fragment);
+            if manager_directory(&environment.stdout)
+                .and_then(|directory| directory.canonicalize().ok())
+                .is_some_and(|directory| {
+                    self.directory.canonicalize().ok().as_ref() == Some(&directory)
+                })
+            {
+                return user;
+            }
+            return Candidate::Foreign {
+                claimed: user.claimed(),
+            };
+        }
+        // An enabled user unit can start on the next login even without a user bus now.
+        if self.system_fragment.is_some() {
+            let offline = self.command(Scope::User, &["--root=/", "is-enabled", UNIT]);
+            if !offline.is_some_and(|output| {
+                matches!(
+                    output.stdout.trim_ascii(),
+                    b"disabled" | b"masked" | b"masked-runtime" | b"static" | b"not-found"
+                )
+            }) {
+                return Candidate::Foreign { claimed: true };
+            }
+        }
+        Candidate::Missing
+    }
+
+    fn selected(&self) -> Option<(Scope, State)> {
+        let user = self.user();
+        let system = self
+            .system_fragment
+            .map_or(Candidate::Missing, |path| self.probe(Scope::System, path));
+        match (user, system) {
+            (Candidate::Foreign { claimed: true }, _)
+            | (_, Candidate::Foreign { claimed: true }) => None,
+            _ if user.claimed() && system.claimed() => None,
+            (_, Candidate::Verified(state)) if system.claimed() => Some((Scope::System, state)),
+            (Candidate::Verified(state), _) => Some((Scope::User, state)),
+            (Candidate::Missing, Candidate::Verified(state)) => Some((Scope::System, state)),
+            _ => None,
+        }
+    }
+
+    fn command(&self, scope: Scope, args: &[&str]) -> Option<Output> {
+        let mut command = Command::new(self.systemctl);
+        command
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("DBUS_SYSTEM_BUS_ADDRESS");
+        match scope {
+            Scope::User => {
+                command.env("XDG_RUNTIME_DIR", &self.runtime).arg("--user");
+            }
+            Scope::System => {
+                command.arg("--system");
+            }
+        }
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+    }
+
+    fn daemon_lock_available(&self) -> bool {
+        match fs::File::options()
+            .read(true)
+            .write(true)
+            .open(self.directory.join("daemon.lock"))
+        {
+            Ok(file) => fs2::FileExt::try_lock_exclusive(&file).is_ok(),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+}
+
+impl<'a> UserService<'a> {
+    fn discover(installation: Installation<'a>) -> Option<Self> {
+        let (scope, _) = installation.selected()?;
         Some(Self {
-            systemctl,
-            runtime: runtime.to_owned(),
-            active,
+            installation,
+            scope,
         })
     }
 
+    pub(crate) fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    fn state(&self) -> Option<State> {
+        self.installation
+            .selected()
+            .and_then(|(scope, state)| (scope == self.scope).then_some(state))
+    }
+
     pub(crate) fn stopped(&self) -> bool {
-        self.control(&["show", "--property=ActiveState", "--value", UNIT])
-            .is_some_and(|output| {
-                output.stdout.trim_ascii() == b"inactive" || output.stdout.trim_ascii() == b"failed"
-            })
+        self.state().is_some_and(|state| !state.active)
+    }
+
+    pub(crate) fn inactive_disabled(&self) -> bool {
+        self.state()
+            .is_some_and(|state| !state.active && !state.failed && !state.enabled)
     }
 
     pub(crate) fn start(&self) -> bool {
-        self.control(&["start", UNIT]).is_some()
+        self.stopped()
+            && self.installation.daemon_lock_available()
+            && self.control(&["start", UNIT]).is_some()
     }
 
     pub(crate) fn stop(&self) -> bool {
-        self.control(&["stop", UNIT]).is_some()
+        self.state().is_some() && self.control(&["stop", UNIT]).is_some()
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
@@ -126,25 +273,26 @@ impl<'a> UserService<'a> {
     }
 
     fn control(&self, args: &[&str]) -> Option<Output> {
-        invoke(self.systemctl, &self.runtime, args)
+        self.installation
+            .command(self.scope, args)
+            .filter(|output| output.status.success())
     }
 
     pub fn apply(&self, first_setup: bool) -> Applied {
+        let Some(state) = self.state() else {
+            return Applied::Failed;
+        };
         let (args, success) = if first_setup {
+            if !state.active && !self.installation.daemon_lock_available() {
+                return Applied::Failed;
+            }
             (&["enable", "--now", UNIT][..], Applied::Started)
-        } else if self.active {
+        } else if state.active {
             (&["try-restart", UNIT][..], Applied::Restarted)
         } else {
             return Applied::Inactive;
         };
-        if invoke(self.systemctl, &self.runtime, args).is_some()
-            && invoke(
-                self.systemctl,
-                &self.runtime,
-                &["is-active", "--quiet", UNIT],
-            )
-            .is_some()
-        {
+        if self.control(args).is_some() && self.control(&["is-active", "--quiet", UNIT]).is_some() {
             success
         } else {
             Applied::Failed
@@ -162,19 +310,6 @@ fn has_owner_socket(runtime: &Path, uid: u32) -> bool {
         fs::symlink_metadata(runtime.join(name))
             .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
     })
-}
-
-fn invoke(systemctl: &Path, runtime: &Path, args: &[&str]) -> Option<Output> {
-    let output = Command::new(systemctl)
-        .env("XDG_RUNTIME_DIR", runtime)
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
-        .arg("--user")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output.status.success().then_some(output)
 }
 
 fn manager_directory(environment: &[u8]) -> Option<PathBuf> {

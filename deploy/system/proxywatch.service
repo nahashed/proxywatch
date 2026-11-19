@@ -1,0 +1,15 @@
+[Unit]
+Description=Proxywatch local proxy and failover monitor
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/proxywatch --directory /root/.config/proxywatch run
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
