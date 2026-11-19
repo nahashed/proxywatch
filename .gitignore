@@ -1,0 +1,17 @@
+/target/
+.DS_Store
+/.prompts/
+/.rules
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/assets/telegram/
+/deploy/github-about.json
+
+/settings.json
+/state.json
+/state.sqlite3
+/state.sqlite3-*
+/delivery.json
+/subscription.json
+/daemon.lock

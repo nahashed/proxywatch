@@ -1,0 +1,48 @@
+English | [Русский](README.ru.md)
+
+# Proxywatch
+
+Give your application one local HTTP or SOCKS5 endpoint. If its upstream stops reaching the service you need, Proxywatch routes new connections through a working backup on the same port. If every node fails, it stops forwarding rather than sending traffic directly.
+
+Proxywatch runs on Linux. It uses [Xray](https://github.com/XTLS/Xray-core) for proxy connections and reads a Mihomo YAML subscription from any provider. It does not need a panel API or admin token.
+
+## Install
+
+The Linux binaries target x86_64 and aarch64 with glibc and are tested on Debian 12. Install Xray separately (tested with 26.7.28). Set its absolute path in the setup menu if it is not on `PATH`. For a public release, download the installer and run it:
+
+```sh
+curl -fsSLo install.sh https://github.com/nahashed/proxywatch/releases/latest/download/install.sh &&
+  sudo bash install.sh
+```
+
+The installer selects the latest stable release for your Linux architecture, checks the archive against its SHA-256 manifest and installs `proxywatch`. It also creates the `pwch` shortcut if that command is free. It does not reconfigure Xray or start a service.
+
+For a private release or an offline machine, use the installer from a local checkout and the archive and `SHA256SUMS` from the trusted release. With both assets in `./release`, run `sudo bash install.sh --from ./release --version v0.1.0`. Before a release is available, build from the checkout with `cargo build --release --locked` and run `./target/release/proxywatch`.
+
+## First run
+
+1. Run `proxywatch` as the account that will run the service. The terminal UI is in Russian. Name the installation, enter the subscription URL and choose a URL that must be reachable through the proxy.
+2. Choose HTTP, SOCKS5 (TCP), or both on separate ports. Defaults are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5. Choose unused ports if another proxy is already running.
+3. Save the settings, then run `proxywatch run` in the foreground or enable the systemd user service:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now proxywatch.service
+```
+
+Point your application at the local port. Reopen `proxywatch` to see the active route, node health and event history. Restart the daemon after changing settings. To keep a user service running after logout, enable lingering for that account.
+
+## What happens when a node fails?
+
+Suppose node A is preferred and B is on standby. By default, Proxywatch checks A every 30 seconds. After three consecutive failures it tries the reserves. If B passes the same check, **new connections use B**. Your application keeps its proxy address, though existing connections may need to reconnect. Once A passes again, **new connections return to A**, even if B is healthy.
+
+- **Selection:** the first scan prefers the fastest successful HTTP response through a node (2xx or 3xx), not the lowest ICMP ping. The preference survives restarts. Reserves are checked every 15 minutes by default and on failover. Additional diagnostic URLs do not trigger switches.
+- **Subscriptions:** the YAML must contain a `proxies` list. Supported entries are VLESS/REALITY/Vision over TCP and Hysteria2. The UI explains skipped entries. A failed refresh preserves the last valid subscription.
+- **Alerts:** configure a Telegram bot and chat ID for delivery through the working proxy. Configure direct SMTP for total outages or failed Telegram delivery. Alerts identify the installation, the affected node, the traffic route and how many nodes are available.
+- **Local data:** each installation keeps its history and notification queue in SQLite under `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). The same directory holds subscription and notification credentials. Keep it private. Use `--directory PATH` for a separate instance.
+
+## Project
+
+Maintainer: [@nahashed](https://github.com/nahashed). Report bugs or suggest changes in [GitHub Issues](https://github.com/nahashed/proxywatch/issues). Do not include subscription URLs, bot tokens or SMTP passwords in reports.
+
+License: [GNU Affero General Public License v3.0](LICENSE).
