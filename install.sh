@@ -38,6 +38,16 @@ available_alias() {
     done
 }
 
+claim_alias() {
+    if available_alias; then
+        if ln -sT -- proxywatch "$alias_path"; then
+            printf 'You can also run pwch.\n'
+        elif [[ ! -e $alias_path && ! -L $alias_path ]]; then
+            fail "Could not create $alias_path"
+        fi
+    fi
+}
+
 version=''
 source_dir=''
 while (($#)); do
@@ -118,6 +128,18 @@ header=$(od -An -tx1 -N6 "$work/proxywatch" | tr -d '[:space:]')
 elf_machine=$(od -An -tx1 -j18 -N2 "$work/proxywatch" | tr -d '[:space:]')
 [[ $header == 7f454c460201 && $elf_machine == "$machine" ]] || fail "Expected an ELF64 binary for $architecture"
 
+# Compare trusted release contents without executing a pre-existing binary as root.
+exec {install_lock}</usr/local
+flock -x "$install_lock"
+if [[ -x $binary && -s $unit ]] && cmp --silent -- "$work/proxywatch" "$binary" &&
+    cmp --silent -- "$work/proxywatch.service" "$unit"; then
+    printf 'Proxywatch %s is already installed.\n' "$tag"
+    claim_alias
+    exit 0
+fi
+
+updating=false
+if [[ -f $binary ]]; then updating=true; fi
 mkdir -p -- "${binary%/*}" "${unit%/*}"
 binary_stage=$(mktemp "${binary%/*}/.proxywatch.XXXXXXXX")
 unit_stage=$(mktemp "${unit%/*}/.proxywatch-service.XXXXXXXX")
@@ -126,12 +148,11 @@ install -m 0644 -- "$work/proxywatch.service" "$unit_stage"
 mv -fT -- "$unit_stage" "$unit"
 mv -fT -- "$binary_stage" "$binary"
 
-printf 'Installed Proxywatch %s. Run proxywatch to open setup.\n' "$tag"
-if available_alias; then
-    if ln -sT -- proxywatch "$alias_path"; then
-        printf 'You can also run pwch.\n'
-    elif [[ ! -e $alias_path && ! -L $alias_path ]]; then
-        fail "Could not create $alias_path"
-    fi
+if [[ $updating == true ]]; then
+    printf 'Updated Proxywatch on disk to %s. Running instances need a restart.\n' "$tag"
+    printf 'For a running user service, run as its owner: systemctl --user daemon-reload && systemctl --user restart proxywatch.service\n'
+else
+    printf 'Installed Proxywatch %s. Run proxywatch to open setup.\n' "$tag"
 fi
+claim_alias
 printf 'No services were started or restarted. Existing settings are unchanged.\n'

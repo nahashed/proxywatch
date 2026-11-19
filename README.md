@@ -17,6 +17,8 @@ curl -fsSLo install.sh https://github.com/nahashed/proxywatch/releases/latest/do
 
 The installer selects the latest stable release for your Linux architecture, checks the archive against its SHA-256 manifest and installs `proxywatch`. It also creates the `pwch` shortcut if that command is free. It does not reconfigure Xray or start a service.
 
+To update, run `sudo bash install.sh` again. If the installed files match the verified release, the installer exits successfully without replacing them. An update preserves your settings and SQLite database. Restart any running Proxywatch process to use the new binary. For a systemd user service, run `systemctl --user daemon-reload && systemctl --user restart proxywatch.service` as the service owner.
+
 For a private release or an offline machine, use the installer from a local checkout and the archive and `SHA256SUMS` from the trusted release. With both assets in `./release`, run `sudo bash install.sh --from ./release --version v0.1.0`. Before a release is available, build from the checkout with `cargo build --release --locked` and run `./target/release/proxywatch`.
 
 ## First run
