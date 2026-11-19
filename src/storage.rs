@@ -15,6 +15,31 @@ use std::{
 use tempfile::NamedTempFile;
 
 pub const PRESETS: &[(&str, &str)] = &include!("../data/check-presets.ron");
+pub const MAX_DIAGNOSTIC_INTERVAL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DiagnosticResource {
+    Url(String),
+    Scheduled { url: String, interval_seconds: u64 },
+}
+
+impl DiagnosticResource {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Url(url) | Self::Scheduled { url, .. } => url,
+        }
+    }
+
+    pub fn interval_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Url(_) => None,
+            Self::Scheduled {
+                interval_seconds, ..
+            } => Some(*interval_seconds),
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,7 +70,7 @@ pub struct Settings {
     pub http_port: Option<u16>,
     pub socks_port: Option<u16>,
     pub check_url: String,
-    pub diagnostic_urls: Vec<String>,
+    pub diagnostic_urls: Vec<DiagnosticResource>,
     pub interval_seconds: u64,
     pub reserve_interval_seconds: u64,
     pub failure_threshold: u32,
@@ -105,7 +130,9 @@ impl Settings {
             &self.subscription_url,
             self.subscription_hwid.enabled(),
         )?;
-        for raw in std::iter::once(&self.check_url).chain(&self.diagnostic_urls) {
+        for raw in std::iter::once(self.check_url.as_str())
+            .chain(self.diagnostic_urls.iter().map(DiagnosticResource::url))
+        {
             let url = reqwest::Url::parse(raw).ok();
             ensure!(
                 url.is_some_and(|u| matches!(u.scheme(), "https" | "http")
@@ -113,6 +140,17 @@ impl Settings {
                     && u.username().is_empty()
                     && u.password().is_none()),
                 message!(invalid_urls)
+            );
+        }
+        let mut intervals = BTreeMap::new();
+        for resource in &self.diagnostic_urls {
+            let seconds = resource.interval_seconds().unwrap_or(self.interval_seconds);
+            ensure!(
+                (1..=MAX_DIAGNOSTIC_INTERVAL_SECONDS).contains(&seconds)
+                    && intervals
+                        .insert(resource.url(), seconds)
+                        .is_none_or(|old| old == seconds),
+                message!(diagnostic_interval)
             );
         }
         ensure!(
@@ -188,6 +226,7 @@ pub struct State {
     pub status: String,
     pub last_probe: Option<bool>,
     pub diagnostics: BTreeMap<String, bool>,
+    pub diagnostic_checked_at: BTreeMap<String, u64>,
     #[serde(skip_serializing)]
     pub history: Vec<Event>,
     #[serde(skip)]

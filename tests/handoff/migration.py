@@ -223,7 +223,7 @@ class Wizard:
         self.choose("Custom URL", "jjjjjj\r")
         self.choose("Health check URL", TARGET + "\r")
         for label in ["Active node check interval", "Backup node check interval", "Consecutive failures",
-                      "Request timeout", "Subscription refresh interval", "Choose additional diagnostic checks?",
+                      "Request timeout", "Subscription refresh interval", "Choose resources for additional checks through the proxy?",
                       "Email over a direct SMTP connection", "Exit without saving"]:
             self.choose(label)
         self.wait("Local ports are in use")

@@ -81,6 +81,7 @@ macro_rules! text {
     (enable_listener) => { "Выберите хотя бы один локальный вход" };
     (different_ports) => { "HTTP и SOCKS5 требуют разных портов от 1 до 65535" };
     (invalid_intervals) => { "Проверьте интервалы и порог ошибок" };
+    (diagnostic_interval) => { "Задайте для каждого ресурса один интервал от 1 до 2592000 секунд" };
     (invalid_diagnostics) => { "Укажите путь Xray и до 16 диагностических URL" };
     (telegram_credentials) => { "Для Telegram нужны токен и ID чата" };
     (smtp_settings) => { "Проверьте параметры SMTP и адреса почты" };

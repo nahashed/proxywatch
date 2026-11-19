@@ -81,6 +81,7 @@ macro_rules! text {
     (enable_listener) => { "Enable at least one local listener" };
     (different_ports) => { "HTTP and SOCKS5 require distinct ports between 1 and 65535" };
     (invalid_intervals) => { "Check the intervals and failure threshold" };
+    (diagnostic_interval) => { "Set one interval per resource, between 1 and 2592000 seconds" };
     (invalid_diagnostics) => { "Specify the Xray path and up to 16 diagnostic URLs" };
     (telegram_credentials) => { "Telegram requires a bot token and a chat ID" };
     (smtp_settings) => { "Check the SMTP settings and email addresses" };

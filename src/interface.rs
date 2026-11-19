@@ -8,7 +8,10 @@ use reqwest::Url;
 use crate::{
     i18n::Language,
     notifications::{Alert, event_label, timestamp},
-    storage::{PRESETS, Paths, Settings, Smtp, State, Telegram},
+    storage::{
+        DiagnosticResource, MAX_DIAGNOSTIC_INTERVAL_SECONDS, PRESETS, Paths, Settings, Smtp, State,
+        Telegram,
+    },
     subscription_identity::HwidMode,
 };
 
@@ -196,14 +199,18 @@ impl Interface {
     }
 
     fn positive(&self, title: &str, current: u64, maximum: u64) -> Result<u64> {
-        let error = || tui!(self.language, number_range, maximum);
+        self.number(title, current, 1, maximum)
+    }
+
+    fn number(&self, title: &str, current: u64, minimum: u64, maximum: u64) -> Result<u64> {
+        let error = || tui!(self.language, number_range, minimum, maximum);
         let input = Input::<String>::with_theme(&self.theme)
             .with_prompt(title)
             .default(current.to_string())
             .validate_with(|text: &String| {
                 text.parse::<u64>()
                     .ok()
-                    .filter(|value| (1..=maximum).contains(value))
+                    .filter(|value| (minimum..=maximum).contains(value))
                     .map(|_| ())
                     .ok_or_else(error)
             })
@@ -612,49 +619,11 @@ impl Interface {
             settings.refresh_seconds,
             2_592_000,
         )?;
-        let mut diagnostics = settings.diagnostic_urls.clone();
-        diagnostics.retain(|url| url != &selected);
-        if self.confirm(tui!(self.language, choose_diagnostics), false)? {
-            let mut options: Vec<String> = PRESETS
-                .iter()
-                .map(|(_, url)| (*url).to_owned())
-                .filter(|url| url != &selected)
-                .collect();
-            for url in &diagnostics {
-                if !options.contains(url) {
-                    options.push(url.clone())
-                }
-            }
-            let names: Vec<_> = options
-                .iter()
-                .map(|url| target_label(self.language, url))
-                .collect();
-            let defaults: Vec<_> = options
-                .iter()
-                .map(|url| diagnostics.contains(url))
-                .collect();
-            self.line(tui!(self.language, diagnostics_hint))?;
-            let Some(indices) = MultiSelect::with_theme(&self.theme)
-                .with_prompt(tui!(self.language, diagnostics))
-                .items(&names)
-                .defaults(&defaults)
-                .interact_on_opt(&self.terminal)?
-            else {
-                return Ok(false);
-            };
-            diagnostics = indices
-                .into_iter()
-                .map(|index| options[index].clone())
-                .collect();
-            while diagnostics.len() < 16
-                && self.confirm(tui!(self.language, add_diagnostic), false)?
-            {
-                let url = self.secret(tui!(self.language, diagnostic_url), "")?;
-                if url != selected && !diagnostics.contains(&url) {
-                    diagnostics.push(url)
-                }
-            }
-        }
+        let Some(diagnostics) =
+            self.diagnostic_resources(&settings.diagnostic_urls, &selected, period)?
+        else {
+            return Ok(false);
+        };
         settings.check_url = selected;
         settings.interval_seconds = period;
         settings.reserve_interval_seconds = reserve_period;
@@ -663,6 +632,106 @@ impl Interface {
         settings.refresh_seconds = refresh;
         settings.diagnostic_urls = diagnostics;
         Ok(true)
+    }
+
+    fn diagnostic_resources(
+        &self,
+        current: &[DiagnosticResource],
+        primary: &str,
+        main_interval: u64,
+    ) -> Result<Option<Vec<DiagnosticResource>>> {
+        let current: Vec<_> = current
+            .iter()
+            .filter(|item| item.url() != primary)
+            .collect();
+        if !self.confirm(tui!(self.language, choose_diagnostics), false)? {
+            return Ok(Some(current.into_iter().cloned().collect()));
+        }
+        let mut options: Vec<_> = PRESETS
+            .iter()
+            .map(|(_, url)| *url)
+            .filter(|url| *url != primary)
+            .collect();
+        let mut names: Vec<_> = options
+            .iter()
+            .map(|url| target_label(self.language, url))
+            .collect();
+        for (index, item) in current.iter().enumerate() {
+            if !options.contains(&item.url()) {
+                options.push(item.url());
+                names.push(tui!(
+                    self.language,
+                    saved_resource,
+                    index + 1,
+                    target_label(self.language, item.url())
+                ));
+            }
+        }
+        let mut defaults: Vec<_> = options
+            .iter()
+            .map(|url| current.iter().any(|item| item.url() == *url))
+            .collect();
+        self.line(tui!(self.language, diagnostics_hint))?;
+        let indices = loop {
+            let Some(indices) = MultiSelect::with_theme(&self.theme)
+                .with_prompt(tui!(self.language, diagnostics))
+                .items(&names)
+                .defaults(&defaults)
+                .interact_on_opt(&self.terminal)?
+            else {
+                return Ok(None);
+            };
+            if indices.len() <= 16 {
+                break indices;
+            }
+            defaults.fill(false);
+            for index in indices {
+                defaults[index] = true;
+            }
+            self.line(tui!(self.language, diagnostic_limit))?;
+        };
+        let mut urls: Vec<String> = indices
+            .into_iter()
+            .map(|index| options[index].to_owned())
+            .collect();
+        while urls.len() < 16 && self.confirm(tui!(self.language, add_diagnostic), false)? {
+            let url = self.secret(tui!(self.language, diagnostic_url), "")?;
+            if url == primary || urls.contains(&url) {
+                self.line(tui!(self.language, diagnostic_duplicate))?;
+            } else {
+                urls.push(url);
+            }
+        }
+        if !urls.is_empty() {
+            self.line(&tui!(
+                self.language,
+                diagnostic_schedule_hint,
+                main_interval
+            ))?;
+        }
+        let mut resources = Vec::with_capacity(urls.len());
+        for (index, url) in urls.into_iter().enumerate() {
+            let interval = current
+                .iter()
+                .find(|item| item.url() == url)
+                .and_then(|item| item.interval_seconds())
+                .unwrap_or(0);
+            let title = tui!(
+                self.language,
+                diagnostic_interval,
+                index + 1,
+                target_label(self.language, &url)
+            );
+            let period = self.number(&title, interval, 0, MAX_DIAGNOSTIC_INTERVAL_SECONDS)?;
+            resources.push(match period {
+                0 => DiagnosticResource::Url(url),
+                interval_seconds => DiagnosticResource::Scheduled {
+                    url,
+                    interval_seconds,
+                },
+            });
+        }
+        Ok(Some(resources))
     }
 
     fn notifications(&self, settings: &mut Settings) -> Result<()> {

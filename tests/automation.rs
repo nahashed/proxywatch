@@ -63,6 +63,39 @@ fn configure_is_atomic_and_errors_do_not_echo_input() -> Result<()> {
 }
 
 #[test]
+fn diagnostic_intervals_accept_legacy_urls_and_validate_edits() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path();
+    let legacy = "https://example.invalid/private-canary";
+    let daily = json!({"url":"https://gemini.google.com/","interval_seconds":86400});
+    let settings = json!({"subscription_url":legacy, "diagnostic_urls":[legacy, daily]});
+    let result = cli(
+        path,
+        &["configure", "--stdin"],
+        &serde_json::to_vec(&settings)?,
+    )?;
+    assert!(result.status.success());
+    let file = path.join("settings.json");
+    let saved = fs::read(&file)?;
+    let stored: Value = serde_json::from_slice(&saved)?;
+    assert_eq!(stored["diagnostic_urls"], settings["diagnostic_urls"]);
+    for resources in [
+        json!([{"url":legacy,"interval_seconds":0}]),
+        json!([{"url":legacy,"interval_seconds":2_592_001}]),
+        json!([{"url":legacy,"interval_second":30}]),
+        json!([legacy,{"url":legacy,"interval_seconds":86400}]),
+    ] {
+        let patch = serde_json::to_vec(&json!({"diagnostic_urls":resources}))?;
+        let result = cli(path, &["configure", "--stdin", "--merge"], &patch)?;
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert!(!String::from_utf8(result.stderr)?.contains("private-canary"));
+        assert_eq!(fs::read(&file)?, saved);
+    }
+    Ok(())
+}
+
+#[test]
 fn status_reads_only_a_public_summary_without_initializing_storage() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("instance");

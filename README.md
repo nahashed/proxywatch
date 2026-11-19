@@ -35,6 +35,8 @@ Updates preserve settings and the database. An identical release leaves the inst
 
 Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 
+Under **Checks and intervals**, select additional resources or add your own URLs. Press Enter to keep the suggested interval. For example, set Gemini to `86400` seconds to check it once a day while the primary Telegram check runs every `30` seconds. Additional results appear in the status screen. The primary check controls failover.
+
 ### Reusing ports from an existing Xray
 
 Enter the new subscription in setup and select the loopback ports your applications already use. Free ports work alongside your existing service. During first setup as root, an installed Proxywatch can also offer to take over the ports of a dedicated system `xray.service`. The wizard identifies HTTP and SOCKS5 from Xray's running configuration and verifies which process owns the listeners. It keeps each protocol on its original port.
@@ -56,6 +58,12 @@ proxywatch status --json
 A minimal settings file is `{"subscription_url":"https://example.invalid/subscription"}`. The first command writes a complete configuration and fills omitted fields with defaults. Use `--merge` to change selected fields in an existing configuration. Nested objects are merged and arrays are replaced. For example, `{"socks_port":null}` disables SOCKS5 while keeping the HTTP settings. Input is validated before saving. Restart a running daemon after changing settings from the CLI.
 
 For providers that require device identification, set `subscription_hwid` to `true` for an automatic ID derived from the Linux machine ID and provider origin, or to a custom string such as `"my-x-hwid-01"`. Automatic IDs are 64 hexadecimal characters (HMAC-SHA256). A custom ID accepts 10 to 64 ASCII letters, digits, hyphens, or equals signs. Use custom values where you have permission to assign the identifier. The default is `false`. When enabled, Proxywatch sends `x-hwid` with HTTPS subscription requests to the configured origin.
+
+In `diagnostic_urls`, a URL string uses the primary check interval. An object with `interval_seconds` sets an interval for that resource. For example, use this JSON with `--merge`.
+
+```json
+{"diagnostic_urls":["https://example.org/",{"url":"https://gemini.google.com/","interval_seconds":86400}]}
+```
 
 `status --json` returns the latest saved snapshot, including node counts, the last update as a Unix timestamp, and pending alerts. JSON keys, values, and exit codes are independent of the interface language. Exit codes are `0` for success, `1` for a configuration or runtime error, and `2` for invalid command syntax.
 

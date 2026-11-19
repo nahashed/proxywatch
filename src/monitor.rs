@@ -3,13 +3,13 @@ use crate::{
     engine::Engine,
     notifications,
     relay::Relay,
-    storage::{Event, NodeHealth, Paths, State},
+    storage::{DiagnosticResource, Event, NodeHealth, Paths, State},
     subscription::{self, Node, Subscription},
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -299,6 +299,106 @@ fn latency(engine: &Engine, url: &str, timeout: Duration) -> Option<u64> {
     Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
+struct DiagnosticCheck<'a> {
+    url: &'a str,
+    interval: Duration,
+    next: Instant,
+}
+
+impl DiagnosticCheck<'_> {
+    fn complete(&mut self, state: &mut State, passed: bool, finished: Instant, timestamp: u64) {
+        state.diagnostics.insert(self.url.to_owned(), passed);
+        state
+            .diagnostic_checked_at
+            .insert(self.url.to_owned(), timestamp);
+        self.next = finished + self.interval;
+    }
+}
+
+struct Diagnostics<'a> {
+    route: Option<Node>,
+    checks: Vec<DiagnosticCheck<'a>>,
+}
+
+impl<'a> Diagnostics<'a> {
+    fn restore(
+        resources: &'a [DiagnosticResource],
+        default_interval: u64,
+        cached_route: Option<Node>,
+        state: &mut State,
+        monotonic: Instant,
+        timestamp: u64,
+    ) -> Self {
+        let configured = |url: &str| {
+            cached_route.is_some() && resources.iter().any(|resource| resource.url() == url)
+        };
+        state.diagnostics.retain(|url, _| configured(url));
+        state
+            .diagnostic_checked_at
+            .retain(|url, _| state.diagnostics.contains_key(url));
+        let mut seen = HashSet::new();
+        let checks = resources
+            .iter()
+            .filter(|resource| seen.insert(resource.url()))
+            .map(|resource| {
+                let url = resource.url();
+                let interval = resource.interval_seconds().unwrap_or(default_interval);
+                // Wall time only reconstructs a deadline after restart. A future stamp is not evidence
+                // of freshness once the wall clock has moved backwards.
+                let remaining = state
+                    .diagnostic_checked_at
+                    .get(url)
+                    .and_then(|previous| timestamp.checked_sub(*previous))
+                    .map_or(0, |age| interval.saturating_sub(age));
+                DiagnosticCheck {
+                    url,
+                    interval: Duration::from_secs(interval),
+                    next: monotonic + Duration::from_secs(remaining),
+                }
+            })
+            .collect();
+        Self {
+            route: cached_route,
+            checks,
+        }
+    }
+
+    fn select_route(&mut self, current: Option<&Node>, state: &mut State, at: Instant) {
+        if self.route.as_ref() != current {
+            self.route = current.cloned();
+            state.diagnostics.clear();
+            state.diagnostic_checked_at.clear();
+            for check in &mut self.checks {
+                check.next = at;
+            }
+        }
+    }
+
+    fn due(&mut self, at: Instant) -> Option<&mut DiagnosticCheck<'a>> {
+        self.route.as_ref()?;
+        self.checks
+            .iter_mut()
+            .min_by_key(|check| check.next)
+            .filter(|check| check.next <= at)
+    }
+
+    fn next(&self) -> Option<Instant> {
+        self.route.as_ref()?;
+        self.checks.iter().map(|check| check.next).min()
+    }
+}
+
+struct ProbeDeadlines {
+    active: Instant,
+    reserves: Instant,
+}
+
+impl ProbeDeadlines {
+    fn next_round(&self) -> Instant {
+        self.active.min(self.reserves)
+    }
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     let _lock = paths.lock()?;
     let mut settings = paths.load_settings()?;
@@ -314,17 +414,39 @@ pub fn run(paths: &Paths) -> Result<()> {
     .context(message!(install_signal_handler))?;
     let relay = Relay::open(settings.http_port, settings.socks_port)?;
     let mut state = paths.load_state()?;
-    state.status = "starting".into();
-    state.started_at = now()?;
-    state.updated_at = state.started_at;
-    paths.save_state(&mut state)?;
     let mut data = paths
         .read::<Cache>("subscription.json")?
         .filter(|cache| cache.matches(&settings.subscription_url, &settings.subscription_hwid))
         .map(|c| c.data);
+    let cached_route = data
+        .as_ref()
+        .and_then(|subscription| {
+            subscription
+                .nodes
+                .iter()
+                .find(|node| state.active.as_deref() == Some(&node.name))
+        })
+        .cloned();
+    let started = Instant::now();
+    let timestamp = now()?;
+    let mut diagnostics = Diagnostics::restore(
+        &settings.diagnostic_urls,
+        settings.interval_seconds,
+        cached_route,
+        &mut state,
+        started,
+        timestamp,
+    );
+    state.status = "starting".into();
+    state.started_at = timestamp;
+    state.updated_at = timestamp;
+    paths.save_state(&mut state)?;
+    let mut probes = ProbeDeadlines {
+        active: started,
+        reserves: started,
+    };
     let mut refresh = Instant::now();
     let mut notify = Instant::now();
-    let mut reserve_scan = Instant::now();
     let mut active: Option<Current<Engine>> = None;
     let mut previously_failed_refresh = false;
     while !stop.load(Ordering::Relaxed) {
@@ -333,7 +455,7 @@ pub fn run(paths: &Paths) -> Result<()> {
             match subscription::fetch(&settings.subscription_url, &settings.subscription_hwid) {
                 Ok(fresh) => {
                     if data.as_ref().is_none_or(|old| old.nodes != fresh.nodes) {
-                        reserve_scan = Instant::now();
+                        probes.reserves = Instant::now();
                     }
                     let cache = Cache {
                         source: settings.subscription_url.clone(),
@@ -354,40 +476,49 @@ pub fn run(paths: &Paths) -> Result<()> {
             }
             refresh = Instant::now() + Duration::from_secs(delay);
         }
-        let nodes = data.as_ref().map_or(&[][..], |d| d.nodes.as_slice());
-        state.skipped = data.as_ref().map_or_else(Vec::new, |d| d.skipped.clone());
-        let old_pending = state.pending.len();
-        let full = Round {
-            nodes,
-            scan_reserves: Instant::now() >= reserve_scan,
-            threshold: settings.failure_threshold,
-            stop: &stop,
+        let tick = Instant::now();
+        if tick >= probes.next_round() {
+            let nodes = data.as_ref().map_or(&[][..], |d| d.nodes.as_slice());
+            state.skipped = data.as_ref().map_or_else(Vec::new, |d| d.skipped.clone());
+            let old_pending = state.pending.len();
+            let full = Round {
+                nodes,
+                scan_reserves: tick >= probes.reserves,
+                threshold: settings.failure_threshold,
+                stop: &stop,
+            }
+            .check(
+                &mut state,
+                &mut active,
+                |engine| latency(engine, &settings.check_url, timeout),
+                |node| {
+                    let engine = Engine::start(&settings, node).ok()?;
+                    let latency = latency(&engine, &settings.check_url, timeout)?;
+                    Some(Measurement { engine, latency })
+                },
+                |engine| relay.set(engine.map(|engine| engine.route)),
+                now,
+            )?;
+            if stop.load(Ordering::Relaxed) {
+                state = paths.load_state()?;
+                break;
+            }
+            if full {
+                probes.reserves =
+                    Instant::now() + Duration::from_secs(settings.reserve_interval_seconds);
+            }
+            if state.pending.len() != old_pending {
+                notify = Instant::now();
+            }
+            state.updated_at = now()?;
+            diagnostics.select_route(
+                active.as_ref().map(|current| &current.node),
+                &mut state,
+                Instant::now(),
+            );
+            probes.active = Instant::now() + Duration::from_secs(settings.interval_seconds);
+            paths.save_state(&mut state)?;
         }
-        .check(
-            &mut state,
-            &mut active,
-            |engine| latency(engine, &settings.check_url, timeout),
-            |node| {
-                let engine = Engine::start(&settings, node).ok()?;
-                let latency = latency(&engine, &settings.check_url, timeout)?;
-                Some(Measurement { engine, latency })
-            },
-            |engine| relay.set(engine.map(|engine| engine.route)),
-            now,
-        )?;
-        if stop.load(Ordering::Relaxed) {
-            state = paths.load_state()?;
-            break;
-        }
-        if full {
-            reserve_scan = Instant::now() + Duration::from_secs(settings.reserve_interval_seconds);
-        }
-        if state.pending.len() != old_pending {
-            notify = Instant::now();
-        }
-        state.updated_at = now()?;
-        state.diagnostics.clear();
-        paths.save_state(&mut state)?;
         if Instant::now() >= notify {
             let mut index = 0;
             while index < state.pending.len() && !stop.load(Ordering::Relaxed) {
@@ -406,22 +537,24 @@ pub fn run(paths: &Paths) -> Result<()> {
                 paths.save_state(&mut state)?;
             }
         }
-        if let Some(current) = &active {
-            for url in &settings.diagnostic_urls {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let passed = current.engine.probe(url, timeout).is_ok();
-                state.diagnostics.insert(url.clone(), passed);
-            }
-            if !settings.diagnostic_urls.is_empty() {
-                paths.save_state(&mut state)?;
-            }
+        // Return to the primary deadlines between diagnostic requests, even if several are overdue.
+        if !stop.load(Ordering::Relaxed)
+            && let Some(current) = &active
+            && let Some(check) = diagnostics.due(Instant::now())
+        {
+            let passed = current.engine.probe(check.url, timeout).is_ok();
+            check.complete(&mut state, passed, Instant::now(), now()?);
+            paths.save_state(&mut state)?;
         }
         if !stop.load(Ordering::Relaxed) {
-            let until_check = Duration::from_secs(settings.interval_seconds);
-            let until_reserves = reserve_scan.saturating_duration_since(Instant::now());
-            match sleep.recv_timeout(until_check.min(until_reserves)) {
+            let mut next = probes.next_round().min(refresh);
+            if let Some(diagnostic) = diagnostics.next() {
+                next = next.min(diagnostic);
+            }
+            if !state.pending.is_empty() {
+                next = next.min(notify);
+            }
+            match sleep.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -616,3 +749,7 @@ mod tests {
         assert!(!scenario.state.nodes.contains_key("A"));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/diagnostic_schedule.rs"]
+mod diagnostic_schedule_tests;
