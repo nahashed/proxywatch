@@ -59,12 +59,7 @@ impl InterruptGuard {
         static INSTALLED: OnceLock<bool> = OnceLock::new();
         let installed = INSTALLED.get_or_init(|| {
             ctrlc::set_handler(|| {
-                if SIGNAL_STATE
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-                        (state != 0).then_some(2)
-                    })
-                    .is_err()
-                {
+                if SIGNAL_STATE.swap(2, Ordering::SeqCst) == 0 {
                     std::process::exit(130);
                 }
             })
