@@ -12,7 +12,26 @@ cd /release
 sha256sum -c SHA256SUMS
 binary=/usr/local/bin/proxywatch
 unit=/usr/local/lib/systemd/user/proxywatch.service
-setup
+# An executable on the invoking user's PATH must never run under installer privileges.
+mkdir /tmp/user-bin
+cat > /tmp/user-bin/xray <<'XRAY'
+#!/bin/sh
+touch /tmp/untrusted-xray-executed
+XRAY
+chmod 755 /tmp/user-bin/xray
+output=$(PATH="/tmp/user-bin:$PATH" setup)
+[[ $output == *'Use --with-xray'* && ! -e /tmp/untrusted-xray-executed ]]
+[[ ! -e /usr/local/lib/proxywatch/xray ]]
+cat > /usr/local/bin/xray <<'XRAY'
+#!/bin/sh
+test "$1" = version || exit 1
+id -u > /tmp/xray-probe-uid
+printf 'Xray 26.7.28 (Xray, Penetrates Everything.)\n'
+XRAY
+chmod 755 /usr/local/bin/xray
+output=$(bash /release/install.sh --from /release --version "$tag" --with-xray)
+[[ $output == *'Using Xray 26.7.28 at /usr/local/bin/xray'* ]]
+[[ $(cat /tmp/xray-probe-uid) == 65534 && ! -e /usr/local/lib/proxywatch/xray ]]
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 [[ $(pwch --version) == "$(proxywatch --version)" ]]
 test -s "$unit"
@@ -66,6 +85,57 @@ rm -- /usr/local/bin/pwch
 [[ $(stat -c '%i %y' "$binary" "$unit") == "$before" ]]
 kill -0 "$previous_pid"
 [[ $(sha256sum settings.json state.sqlite3) == "$state" ]]
+# Consent alone cannot install a corrupt private engine or replace a system installation.
+sed -i 's/Xray 26.7.28/Xray 25.1.1/' /usr/local/bin/xray
+old_engine=$(sha256sum /usr/local/bin/xray)
+mkdir /tmp/invalid-xray
+cp /release/SHA256SUMS "/release/$archive" /tmp/invalid-xray/
+printf invalid > /tmp/invalid-xray/Xray-linux-64.zip
+printf invalid > /tmp/invalid-xray/Xray-linux-arm64-v8a.zip
+if bash /release/install.sh --from /tmp/invalid-xray --version "$tag" --with-xray; then exit 1; fi
+[[ $(sha256sum /usr/local/bin/xray) == "$old_engine" && ! -e /usr/local/lib/proxywatch/xray ]]
+output=$(printf 'n\n' | script -qec "bash /release/install.sh --from /tmp/invalid-xray --version $tag" /dev/null)
+[[ $output == *'older than 26.7.28'* && $output == *'Install Xray'* && $output == *'already installed'* ]]
+[[ ! -e /usr/local/lib/proxywatch/xray ]]
+
+# Only the distributed user unit may be restarted, and only after a change.
+cat > /usr/bin/systemctl <<'SYSTEMD'
+#!/bin/sh
+test "$1" = --user || exit 2
+case "$2" in
+    is-active) exit 0 ;;
+    show)
+        case "$3" in
+            --property=FragmentPath) printf '/usr/local/lib/systemd/user/proxywatch.service\n' ;;
+            --property=DropInPaths) test ! -e /tmp/mock-override || printf 'override.conf\n' ;;
+            *) exit 2 ;;
+        esac ;;
+    daemon-reload|try-restart) echo "$*" >> /tmp/systemd-actions ;;
+    *) exit 2 ;;
+esac
+SYSTEMD
+chmod 755 /usr/bin/systemctl
+bash /release/install.sh --from /tmp/previous --version v0.0.0
+expected_actions=$'--user daemon-reload\n--user try-restart proxywatch.service'
+[[ $(cat /tmp/systemd-actions) == "$expected_actions" ]]
+touch /tmp/mock-override
+setup
+[[ $(cat /tmp/systemd-actions) == "$expected_actions" ]]
+rm /tmp/mock-override
+setup
+[[ $(cat /tmp/systemd-actions) == "$expected_actions" ]]
+
+# Use a shell fixture as the newly installed command to observe the setup wizard's UID.
+mkdir /tmp/wizard
+cd /tmp/wizard
+cat > tui <<'WIZARD'
+printf 'wizard-uid=%s\n' "$(id -u)"
+WIZARD
+cp /bin/bash "/tmp/previous/$older/proxywatch"
+(cd /tmp/previous && tar -czf "$older.tar.gz" "$older" && sha256sum "$older.tar.gz" > SHA256SUMS)
+rm "$binary"
+output=$(printf 'n\n' | SUDO_UID=65534 script -qec 'bash /release/install.sh --from /tmp/previous --version v0.0.0' /dev/null)
+[[ $output == *'wizard-uid=65534'* ]]
 printf 'PASS: %s %s\n' "$(uname -m)" "$tag"
 LINUX
 done
