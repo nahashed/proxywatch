@@ -12,6 +12,7 @@ macro_rules! tui_ru {
     (number_range) => { "Введите число от 1 до {}" };
     (pause) => { "\nНажмите Enter, чтобы вернуться в меню." };
     (first_setup) => { "Proxywatch · Первая настройка" };
+    (subscription_hwid) => { "Передавать идентификатор устройства (HWID) провайдеру этой подписки по HTTPS?" };
     (subscription_url) => { "Ссылка на подписку Mihomo YAML" };
     (notification_intro) => { "Telegram доставляет события через рабочий выход. Для письма при потере всех узлов настройте SMTP." };
     (settings_title) => { "Proxywatch · Настройки" };

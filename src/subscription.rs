@@ -2,7 +2,7 @@ use crate::i18n::Language;
 use crate::profile::validate_outbound;
 use crate::runtime_text::{self, NodeError, NodeResult, message, node_error, require};
 use anyhow::{Context, Result, ensure};
-use reqwest::{Url, blocking::Client, redirect::Policy};
+use reqwest::{Url, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, io::Read, time::Duration};
@@ -40,7 +40,7 @@ impl SkippedNode {
     }
 }
 
-pub fn fetch(address: &str) -> Result<Subscription> {
+pub fn subscription_url(address: &str, hwid: bool) -> Result<Url> {
     let url =
         Url::parse(address).map_err(|_| anyhow::anyhow!(message!(invalid_subscription_url)))?;
     ensure!(
@@ -50,29 +50,22 @@ pub fn fetch(address: &str) -> Result<Subscription> {
             && url.password().is_none(),
         message!(subscription_url_credentials)
     );
+    ensure!(!hwid || url.scheme() == "https", message!(hwid_https));
+    Ok(url)
+}
+
+pub fn fetch(address: &str, hwid: bool) -> Result<Subscription> {
+    let url = subscription_url(address, hwid)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .user_agent("Clash.Meta/1.19 Proxywatch/0.1")
         .referer(false)
-        .redirect(Policy::custom(|attempt| {
-            let next = attempt.url();
-            if attempt.previous().len() > 4
-                || !matches!(next.scheme(), "https" | "http")
-                || !next.username().is_empty()
-                || next.password().is_some()
-                || (next.scheme() == "http"
-                    && attempt.previous().iter().any(|url| url.scheme() == "https"))
-            {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
+        .redirect(crate::subscription_hwid::redirect_policy(hwid))
         .build()
         .context(message!(create_subscription_client))?;
-    let response = client
-        .get(url)
+    let request = crate::subscription_hwid::request(&client, url, hwid)?;
+    let response = request
         .send()
         .map_err(|_| anyhow::anyhow!(message!(download_subscription)))?;
     ensure!(

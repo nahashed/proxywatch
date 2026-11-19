@@ -12,6 +12,7 @@ macro_rules! tui_en {
     (number_range) => { "Enter a number from 1 to {}" };
     (pause) => { "\nPress Enter to return to the menu." };
     (first_setup) => { "Proxywatch · First-time setup" };
+    (subscription_hwid) => { "Send a device identifier (HWID) to this subscription provider over HTTPS?" };
     (subscription_url) => { "Mihomo YAML subscription URL" };
     (notification_intro) => { "Telegram sends events through the working proxy. Configure SMTP to receive email when all nodes are down." };
     (settings_title) => { "Proxywatch · Settings" };

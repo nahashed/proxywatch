@@ -21,7 +21,15 @@ use std::{
 #[derive(Serialize, Deserialize)]
 struct Cache {
     source: String,
+    #[serde(default)]
+    subscription_hwid: bool,
     data: Subscription,
+}
+
+impl Cache {
+    fn matches(&self, source: &str, hwid: bool) -> bool {
+        self.source == source && self.subscription_hwid == hwid
+    }
 }
 
 fn now() -> Result<u64> {
@@ -311,7 +319,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     paths.save_state(&mut state)?;
     let mut data = paths
         .read::<Cache>("subscription.json")?
-        .filter(|c| c.source == settings.subscription_url)
+        .filter(|cache| cache.matches(&settings.subscription_url, settings.subscription_hwid))
         .map(|c| c.data);
     let mut refresh = Instant::now();
     let mut notify = Instant::now();
@@ -321,22 +329,23 @@ pub fn run(paths: &Paths) -> Result<()> {
     while !stop.load(Ordering::Relaxed) {
         if Instant::now() >= refresh {
             let mut delay = settings.refresh_seconds;
-            match subscription::fetch(&settings.subscription_url) {
+            match subscription::fetch(&settings.subscription_url, settings.subscription_hwid) {
                 Ok(fresh) => {
                     if data.as_ref().is_none_or(|old| old.nodes != fresh.nodes) {
                         reserve_scan = Instant::now();
                     }
                     let cache = Cache {
                         source: settings.subscription_url.clone(),
+                        subscription_hwid: settings.subscription_hwid,
                         data: fresh,
                     };
                     paths.write("subscription.json", &cache)?;
                     data = Some(cache.data);
                     previously_failed_refresh = false;
                 }
-                Err(_) => {
+                Err(error) => {
                     if !previously_failed_refresh {
-                        eprintln!("{}", message!(subscription_retry));
+                        eprintln!("{} {error}", message!(subscription_retry));
                     }
                     previously_failed_refresh = true;
                     delay = delay.min(settings.interval_seconds.max(5));
@@ -427,6 +436,21 @@ pub fn run(paths: &Paths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_subscription_requires_the_same_url_and_hwid_mode() -> Result<()> {
+        let source = "https://example.invalid/sub";
+        let mut cache: Cache = serde_json::from_value(serde_json::json!({
+            "source": source, "data": {"nodes": [], "skipped": []}
+        }))?;
+        assert!(cache.matches(source, false));
+        assert!(!cache.matches(source, true));
+        cache.subscription_hwid = true;
+        assert!(cache.matches(source, true));
+        assert!(!cache.matches(source, false));
+        assert!(!cache.matches("https://example.invalid/other", true));
+        Ok(())
+    }
 
     #[derive(Default)]
     struct Scenario {

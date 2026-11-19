@@ -41,6 +41,7 @@ pub struct Settings {
     pub instance_name: String,
     pub instance_description: String,
     pub subscription_url: String,
+    pub subscription_hwid: bool,
     pub http_port: Option<u16>,
     pub socks_port: Option<u16>,
     pub check_url: String,
@@ -66,6 +67,7 @@ impl Default for Settings {
                 .unwrap_or_else(|| "Proxywatch".into()),
             instance_description: String::new(),
             subscription_url: String::new(),
+            subscription_hwid: false,
             http_port: Some(10809),
             socks_port: Some(10808),
             check_url: PRESETS[0].1.into(),
@@ -98,10 +100,8 @@ impl Settings {
                 && valid_label(&self.instance_description, 160),
             message!(invalid_labels)
         );
-        for raw in std::iter::once(&self.subscription_url)
-            .chain(std::iter::once(&self.check_url))
-            .chain(&self.diagnostic_urls)
-        {
+        crate::subscription::subscription_url(&self.subscription_url, self.subscription_hwid)?;
+        for raw in std::iter::once(&self.check_url).chain(&self.diagnostic_urls) {
             let url = reqwest::Url::parse(raw).ok();
             ensure!(
                 url.is_some_and(|u| matches!(u.scheme(), "https" | "http")

@@ -12,6 +12,7 @@ mod relay;
 mod runtime_text;
 mod storage;
 mod subscription;
+mod subscription_hwid;
 #[cfg(test)]
 #[path = "../tests/unit/fixtures.rs"]
 mod test_fixtures;

@@ -195,9 +195,9 @@ impl Interface {
         self.screen(tui!(self.language, first_setup))?;
         let mut settings = Settings {
             language: self.language,
-            subscription_url: self.secret(tui!(self.language, subscription_url), "")?,
             ..Settings::default()
         };
+        self.subscription(&mut settings)?;
         self.identity(&mut settings)?;
         if !self.ports(&mut settings)? || !self.checks(&mut settings)? {
             return Ok(false);
@@ -255,12 +255,7 @@ impl Interface {
                     self.pause()?;
                     return Ok(true);
                 }
-                Some(1) => {
-                    settings.subscription_url = self.secret(
-                        tui!(self.language, subscription_url),
-                        &settings.subscription_url,
-                    )?
-                }
+                Some(1) => self.subscription(&mut settings)?,
                 Some(2) => {
                     self.ports(&mut settings)?;
                 }
@@ -285,6 +280,18 @@ impl Interface {
                 _ => return Ok(false),
             }
         }
+    }
+
+    fn subscription(&self, settings: &mut Settings) -> Result<()> {
+        settings.subscription_url = self.secret(
+            tui!(self.language, subscription_url),
+            &settings.subscription_url,
+        )?;
+        settings.subscription_hwid = self.confirm(
+            tui!(self.language, subscription_hwid),
+            settings.subscription_hwid,
+        )?;
+        Ok(())
     }
 
     fn identity(&self, settings: &mut Settings) -> Result<()> {

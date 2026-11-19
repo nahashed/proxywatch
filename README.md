@@ -10,7 +10,7 @@ Proxywatch runs on Linux. It uses [Xray](https://github.com/XTLS/Xray-core) for 
 
 - Run an HTTP proxy, a SOCKS5 TCP proxy, or both on separate loopback ports.
 - Check the target service through each node. After a confirmed failure, send new connections to a working reserve on the same local port. Return to the preferred node when it recovers.
-- Import VLESS/REALITY/Vision over TCP and Hysteria2 from a Mihomo YAML `proxies` list. View the reason for each skipped entry in the menu. A failed refresh preserves the last valid subscription.
+- Import VLESS/REALITY/Vision over TCP and Hysteria2 from a Mihomo YAML `proxies` list. View the reason for each skipped entry in the menu. A failed refresh preserves the last valid subscription. Providers that require device identification can receive an optional HWID.
 - Send Telegram alerts through the active proxy and use direct SMTP for a total outage or failed Telegram delivery. Menus and alerts support English and Russian.
 - Configure from JSON, read status from scripts and keep node history and queued notifications locally in SQLite.
 
@@ -56,6 +56,8 @@ proxywatch status --json
 ```
 
 For a single listener, set the unused port to `null` in the JSON settings. For example, `"socks_port": null` leaves only HTTP enabled. Omitting a port uses its default.
+
+If your subscription provider requires a device ID, enable HWID in subscription settings or set `"subscription_hwid": true`. Proxywatch sends an `x-hwid` header on HTTPS subscription requests to the configured origin. It derives a stable ID from the Linux machine ID and the provider’s origin. The ID stays the same for a given installation, host name and HTTPS port. Changing the Linux machine ID changes the HWID. Sending it is disabled by default.
 
 Configuration replaces the entire settings object. Omitted fields take their defaults. Unknown fields are rejected. Validation happens before saving, and successful configuration produces no output. Restart a running daemon to apply the settings.
 
