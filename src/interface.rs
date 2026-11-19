@@ -763,7 +763,7 @@ impl Interface {
                 let event = events[index];
                 self.screen(tui!(self.language, event_details))?;
                 let alert = Alert::from_event(settings, event, false)?;
-                self.line(&alert.text)?;
+                self.line(&alert.text())?;
                 for (name, available) in event.changes.iter().skip(5) {
                     self.line(&format!(
                         "{}: {}",

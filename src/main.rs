@@ -10,6 +10,7 @@ mod notifications;
 mod profile;
 mod relay;
 mod runtime_text;
+mod server_time;
 mod storage;
 mod subscription;
 mod subscription_hwid;

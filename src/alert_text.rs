@@ -3,6 +3,8 @@ use crate::i18n::Language;
 pub struct AlertText {
     pub delayed: &'static str,
     pub unknown_kind: &'static str,
+    pub instance: &'static str,
+    pub server_time: &'static str,
     pub purpose: &'static str,
     pub unspecified: &'static str,
     pub up: &'static str,

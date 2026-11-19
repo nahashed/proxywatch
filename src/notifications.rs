@@ -15,7 +15,41 @@ use std::{io::Read, time::Duration};
 pub(crate) struct Alert {
     pub(crate) title: String,
     pub(crate) summary: &'static str,
-    pub(crate) text: String,
+    sections: Vec<Vec<Line>>,
+}
+
+enum Line {
+    Heading(&'static str),
+    Field(&'static str, String),
+    Text(String),
+}
+
+impl Line {
+    fn render(&self, html: bool) -> String {
+        let escape = |text: &str| {
+            if html {
+                text.replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            } else {
+                text.to_owned()
+            }
+        };
+        let bold = |text: &str| {
+            if html {
+                format!("<b>{}</b>", escape(text))
+            } else {
+                text.to_owned()
+            }
+        };
+        match self {
+            Self::Heading(label) => bold(label),
+            Self::Field(label, value) => {
+                format!("{} {}", bold(&format!("{label}:")), escape(value))
+            }
+            Self::Text(value) => escape(value),
+        }
+    }
 }
 
 impl Alert {
@@ -32,27 +66,12 @@ impl Alert {
         } else {
             event_label(lang, &event.kind).ok_or_else(|| anyhow!(words.unknown_kind))?
         };
-        let mut lines = vec![summary.to_owned()];
-        if !settings.instance_description.is_empty() {
-            lines.push(format!(
-                "{}: {}",
+        let mut identity = vec![Line::Field(words.instance, title.clone())];
+        if !settings.instance_description.trim().is_empty() {
+            identity.push(Line::Field(
                 words.purpose,
-                safe_label(&settings.instance_description, words.unspecified)
+                safe_label(&settings.instance_description, words.unspecified),
             ));
-        }
-        for (name, available) in event.changes.iter().take(5) {
-            let (indicator, state) = if *available {
-                ("🟢", words.up)
-            } else {
-                ("🔴", words.down)
-            };
-            lines.push(format!(
-                "{indicator} {}: {state}",
-                safe_label(name, words.unnamed)
-            ));
-        }
-        if event.changes.len() > 5 {
-            lines.push(format!("{}: {}", words.more, event.changes.len() - 5));
         }
         let route = if event.kind == "outage" {
             words.stopped.into()
@@ -73,34 +92,72 @@ impl Alert {
                 ),
             }
         };
-        lines.push(format!("{}: {route}", words.route));
+        let mut nodes = Vec::new();
         if event.total != 0 || event.started_at != 0 {
-            lines.push(format!(
-                "{}: {} {} {}",
-                words.available, event.available, words.of, event.total
+            nodes.push(Line::Field(
+                words.available,
+                format!("{} {} {}", event.available, words.of, event.total),
             ));
         }
-        lines.push(format!("{}: {}", words.event, timestamp(lang, event.at)));
-        if event.started_at != 0 {
-            lines.push(format!(
-                "{}: {}",
-                words.start,
-                timestamp(lang, event.started_at)
+        nodes.push(Line::Field(words.route, route));
+        for (name, available) in event.changes.iter().take(5) {
+            let state = if *available { words.up } else { words.down };
+            nodes.push(Line::Text(format!(
+                "• {}: {state}",
+                safe_label(name, words.unnamed)
+            )));
+        }
+        if event.changes.len() > 5 {
+            nodes.push(Line::Field(
+                words.more,
+                (event.changes.len() - 5).to_string(),
             ));
+        }
+
+        let mut sections = vec![vec![Line::Heading(summary)], identity, nodes];
+        let time_block = |label, seconds| {
+            let mut block = vec![Line::Heading(label)];
+            if let Some((utc, local)) = crate::server_time::event_times(lang, seconds) {
+                block.push(Line::Text(utc));
+                if let Some(local) = local {
+                    block.push(Line::Field(words.server_time, local));
+                }
+            } else {
+                block.push(Line::Text(words.unknown_time.into()));
+            }
+            block
+        };
+        sections.push(time_block(words.event, event.at));
+        if event.started_at != 0 && event.started_at / 60 != event.at / 60 {
+            sections.push(time_block(words.start, event.started_at));
         }
         Ok(Self {
             title,
             summary,
-            text: lines.join("\n"),
+            sections,
         })
     }
 
-    fn markdown(&self) -> String {
-        format!(
-            "*{}*\n\n{}",
-            escape_markdown(&self.title),
-            escape_markdown(&self.text)
-        )
+    fn render(&self, html: bool) -> String {
+        self.sections
+            .iter()
+            .map(|section| {
+                section
+                    .iter()
+                    .map(|line| line.render(html))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub(crate) fn text(&self) -> String {
+        self.render(false)
+    }
+
+    fn html(&self) -> String {
+        self.render(true)
     }
 }
 
@@ -147,17 +204,6 @@ pub(crate) fn timestamp(lang: Language, seconds: u64) -> String {
         date.minute(),
         date.second()
     )
-}
-
-fn escape_markdown(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if r"\_*[]()~`>#+-=|{}.!".contains(ch) {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
 }
 
 pub fn deliver(settings: &Settings, event: &Event, proxy_client: Option<&Client>) -> Result<()> {
@@ -230,8 +276,8 @@ fn send_telegram(
         .timeout(timeout)
         .json(&json!({
             "chat_id": config.chat_id,
-            "parse_mode": "MarkdownV2",
-            "text": alert.markdown(),
+            "parse_mode": "HTML",
+            "text": alert.html(),
             "link_preview_options": {"is_disabled": true}
         }))
         .send()
@@ -261,7 +307,7 @@ fn send_email(config: &Smtp, alert: &Alert, timeout: Duration) -> Result<()> {
             .map_err(|_| anyhow!(alerts(language()).recipient))?)
         .subject(format!("{}: {}", alert.title, alert.summary))
         .header(ContentType::TEXT_PLAIN)
-        .body(format!("{}\n\n{}", alert.title, alert.text))
+        .body(alert.text())
         .map_err(|_| anyhow!(alerts(language()).compose))?;
     let builder = if config.port == 465 {
         SmtpTransport::relay(&config.host)

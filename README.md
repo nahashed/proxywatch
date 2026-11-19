@@ -9,7 +9,7 @@ Proxywatch gives Linux applications a stable local HTTP or SOCKS5 proxy. It chec
 - Run HTTP, SOCKS5 (TCP), or both. The default endpoints are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5.
 - Read VLESS/REALITY/Vision over TCP and Hysteria2 nodes from a Mihomo YAML subscription. You can use a link from Remnawave, Marzban, or 3x-ui (X-UI) when the panel serves a compatible `proxies` list. Setup only needs the subscription URL. If a refresh fails, Proxywatch keeps the last valid list.
 - Choose the preferred node by the fastest successful HTTP check. By default, Proxywatch checks the active node every 30 seconds and reserves every 15 minutes. After three consecutive failures it checks the reserves immediately. When the preferred node recovers, new connections return to it. During a total outage forwarding stops. Existing connections may need to reconnect.
-- Receive Telegram alerts through the active proxy and email via direct SMTP during a total outage or when Telegram delivery fails. Event times are in UTC.
+- Receive Telegram alerts through the active proxy and email via direct SMTP during a total outage or when Telegram delivery fails. Alerts show UTC and the server’s local time when it differs.
 - Inspect node health and event history in the terminal, or read machine-readable status from a script. History and queued alerts are stored locally in SQLite.
 
 ## Install or update
