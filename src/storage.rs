@@ -77,7 +77,7 @@ impl Default for Settings {
             failure_threshold: 3,
             timeout_seconds: 8,
             refresh_seconds: 3600,
-            xray_binary: "xray".into(),
+            xray_binary: crate::xray_binary::default_binary().into(),
             telegram: None,
             smtp: None,
         }
@@ -225,6 +225,10 @@ fn write_snapshot(transaction: &Transaction<'_>, state: &State) -> Result<()> {
 }
 
 impl Paths {
+    pub fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     pub fn resolve(directory: Option<PathBuf>) -> Result<Self> {
         let directory = directory
             .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("proxywatch")))

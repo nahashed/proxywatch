@@ -30,9 +30,10 @@ macro_rules! tui {
     };
 }
 
-pub fn run(paths: &Paths) -> Result<()> {
+pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
     let terminal = Term::stderr();
     let mut ui = Interface {
+        explicit_directory,
         language: if paths.has_settings() {
             paths.load_settings()?.language
         } else {
@@ -80,6 +81,7 @@ pub fn run(paths: &Paths) -> Result<()> {
 }
 
 struct Interface {
+    explicit_directory: bool,
     language: Language,
     terminal: Term,
     theme: ColorfulTheme,
@@ -196,6 +198,7 @@ impl Interface {
         self.screen(tui!(self.language, first_setup))?;
         let mut settings = Settings {
             language: self.language,
+            xray_binary: crate::xray_binary::setup_binary(),
             ..Settings::default()
         };
         self.subscription(&mut settings)?;
@@ -246,15 +249,9 @@ impl Interface {
                         self.pause()?;
                         continue;
                     }
-                    let existing = paths.has_settings();
-                    paths.save_settings(&settings)?;
-                    self.line(if existing {
-                        tui!(self.language, saved_existing)
-                    } else {
-                        tui!(self.language, saved_new)
-                    })?;
-                    self.pause()?;
-                    return Ok(true);
+                    if self.save(paths, &mut settings)? {
+                        return Ok(true);
+                    }
                 }
                 Some(1) => self.subscription(&mut settings)?,
                 Some(2) => {
@@ -281,6 +278,43 @@ impl Interface {
                 _ => return Ok(false),
             }
         }
+    }
+
+    fn save(&self, paths: &Paths, settings: &mut Settings) -> Result<bool> {
+        use crate::user_service::{Applied, UserService, foreground_command};
+
+        let service = UserService::installed(paths.directory(), self.explicit_directory);
+        if let Some((binary, [major, minor, patch])) =
+            crate::xray_binary::inspect_binary(&settings.xray_binary)
+        {
+            // The service manager can have a different PATH from the interactive shell.
+            if let Some(binary) = binary.to_str() {
+                settings.xray_binary = binary.to_owned();
+            }
+            self.line(&tui!(self.language, xray_detected, major, minor, patch))?;
+        } else {
+            self.line(tui!(self.language, xray_unavailable))?;
+            if service.is_some() {
+                self.pause()?;
+                return Ok(false);
+            }
+        }
+
+        let first_setup = !paths.has_settings();
+        paths.save_settings(settings)?;
+        let outcome = service.map(|service| service.apply(first_setup));
+        match outcome {
+            Some(Applied::Started) => self.line(tui!(self.language, service_started))?,
+            Some(Applied::Restarted) => self.line(tui!(self.language, service_restarted))?,
+            Some(Applied::Failed) => self.line(tui!(self.language, service_failed))?,
+            Some(Applied::Inactive) | None => {
+                let command =
+                    foreground_command(self.explicit_directory.then_some(paths.directory()));
+                self.line(&tui!(self.language, saved_foreground, command))?;
+            }
+        }
+        self.pause()?;
+        Ok(true)
     }
 
     fn subscription(&self, settings: &mut Settings) -> Result<()> {

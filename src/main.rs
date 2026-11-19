@@ -17,6 +17,8 @@ mod subscription_identity;
 #[cfg(test)]
 #[path = "../tests/unit/fixtures.rs"]
 mod test_fixtures;
+mod user_service;
+mod xray_binary;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
@@ -153,7 +155,7 @@ fn execute(arguments: Arguments) -> Result<()> {
             automation::configure(&writable_paths()?, std::io::stdin().lock(), merge)
         }
         Command::Run => monitor::run(&writable_paths()?),
-        Command::Tui => interface::run(&writable_paths()?),
+        Command::Tui => interface::run(&writable_paths()?, arguments.directory.is_some()),
     }
 }
 

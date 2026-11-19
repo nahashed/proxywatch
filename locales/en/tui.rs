@@ -31,8 +31,12 @@ macro_rules! tui_en {
     (identity) => { "Installation name and purpose" };
     (discard) => { "Exit without saving" };
     (invalid_settings) => { "Check your settings. {}" };
-    (saved_existing) => { "Settings saved. Restart the running service to apply them. For systemd, run systemctl --user restart proxywatch." };
-    (saved_new) => { "Settings saved. Run proxywatch run, or use systemctl --user enable --now proxywatch after installing the unit file." };
+    (xray_detected) => { "Xray {}.{}.{} is available." };
+    (xray_unavailable) => { "Xray 26.7.28 or later is required. Install Xray or choose its executable under Xray path." };
+    (service_started) => { "Settings saved. The Proxywatch user service is enabled and running." };
+    (service_restarted) => { "Settings saved. The running Proxywatch user service restarted with your changes." };
+    (service_failed) => { "Settings saved. The user service could not be started or restarted. Check systemctl --user status proxywatch.service." };
+    (saved_foreground) => { "Settings saved. Run in the foreground with {}. Restart any foreground instance to apply changes." };
     (xray_binary) => { "Xray executable name or path" };
     (instance_name) => { "Installation name" };
     (instance_description) => { "Purpose (optional)" };
