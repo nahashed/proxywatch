@@ -14,14 +14,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-pub const PRESETS: &[(&str, &str)] = &[
-    ("Telegram", "https://telegram.org/"),
-    ("OpenAI", "https://openai.com/"),
-    ("Claude", "https://claude.ai/"),
-    ("Gemini", "https://gemini.google.com/"),
-    ("YouTube", "https://www.youtube.com/"),
-    ("Instagram", "https://www.instagram.com/"),
-];
+pub const PRESETS: &[(&str, &str)] = &include!("../data/check-presets.ron");
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

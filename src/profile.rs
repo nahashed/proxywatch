@@ -1,4 +1,5 @@
 use crate::runtime_text::{NodeResult, node_error, require};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Map, Value};
 use std::net::IpAddr;
 
@@ -43,7 +44,7 @@ fn validate_vless(settings: &Value, stream: &Value) -> NodeResult<()> {
     )?;
     host(string(reality, "serverName")?)?;
     require!(
-        base64_url_bytes(string(reality, "publicKey")?, 32),
+        valid_reality_key(string(reality, "publicKey")?),
         invalid_public_key
     );
     if let Some(short_id) = optional(reality, "shortId")? {
@@ -218,21 +219,8 @@ fn host(value: &str) -> NodeResult<()> {
     Ok(())
 }
 
-fn base64_url_bytes(value: &str, size: usize) -> bool {
-    let expected = (size * 8).div_ceil(6);
-    if value.len() != expected {
-        return false;
-    }
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut last = 0;
-    for byte in value.bytes() {
-        let Some(index) = alphabet.iter().position(|item| *item == byte) else {
-            return false;
-        };
-        last = index;
-    }
-    let unused_bits = expected * 6 - size * 8;
-    last & ((1 << unused_bits) - 1) == 0
+fn valid_reality_key(value: &str) -> bool {
+    URL_SAFE_NO_PAD.decode_slice(value, &mut [0; 32]) == Ok(32)
 }
 
 fn bandwidth(value: &str) -> NodeResult<f64> {
@@ -263,71 +251,16 @@ fn bandwidth(value: &str) -> NodeResult<f64> {
 }
 
 fn validate_fingerprint(value: &str) -> NodeResult<()> {
-    const FINGERPRINTS: &[&str] = &[
-        "",
-        "chrome",
-        "firefox",
-        "safari",
-        "ios",
-        "android",
-        "edge",
-        "360",
-        "qq",
-        "random",
-        "randomized",
-        "randomizednoalpn",
-        "hellofirefox_120",
-        "hellofirefox_148",
-        "hellochrome_120",
-        "hellochrome_131",
-        "hellochrome_133",
-        "helloios_13",
-        "helloios_14",
-        "helloedge_106",
-        "hellosafari_26_3",
-        "hello360_11_0",
-        "helloqq_11_1",
-        "hellorandomized",
-        "hellorandomizedalpn",
-        "hellorandomizednoalpn",
-        "hellofirefox_auto",
-        "hellofirefox_55",
-        "hellofirefox_56",
-        "hellofirefox_63",
-        "hellofirefox_65",
-        "hellofirefox_99",
-        "hellofirefox_102",
-        "hellofirefox_105",
-        "hellochrome_auto",
-        "hellochrome_58",
-        "hellochrome_62",
-        "hellochrome_70",
-        "hellochrome_72",
-        "hellochrome_83",
-        "hellochrome_87",
-        "hellochrome_96",
-        "hellochrome_100",
-        "hellochrome_102",
-        "hellochrome_106_shuffle",
-        "helloios_auto",
-        "helloios_11_1",
-        "helloios_12_1",
-        "helloandroid_11_okhttp",
-        "helloedge_85",
-        "helloedge_auto",
-        "hellosafari_16_0",
-        "hellosafari_auto",
-        "hello360_auto",
-        "hello360_7_5",
-        "helloqq_auto",
-        "hellochrome_100_psk",
-        "hellochrome_112_psk_shuf",
-        "hellochrome_114_padding_psk_shuf",
-        "hellochrome_115_pq",
-        "hellochrome_115_pq_psk",
-        "hellochrome_120_pq",
-    ];
-    let value = value.to_ascii_lowercase();
-    require!(FINGERPRINTS.contains(&value.as_str()), unknown_fingerprint);
+    // Xray's REALITY client uses the TLS registry except for unsafe and hellogolang.
+    // An empty fingerprint selects Xray's default, independently of the named presets.
+    const NAMES: &str = include_str!("../data/xray-v26.7.28-reality-fingerprints.txt");
+    require!(
+        value.is_empty() || NAMES.lines().any(|name| name.eq_ignore_ascii_case(value)),
+        unknown_fingerprint
+    );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/profile.rs"]
+mod tests;
