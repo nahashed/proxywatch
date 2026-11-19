@@ -9,8 +9,8 @@
   "recovery": "Connection restored",
   "truncated": "Additional nodes: 495",
   "delayed": "All nodes were previously unavailable",
-  "node_alert_html": "<b>Node availability changed</b>\n\n<b>Instance:</b> Test instance\n<b>Purpose:</b> Monitoring\n\n<b>Available nodes:</b> 1 of 2\n<b>Active route:</b> Primary\n• Backup: available",
-  "node_alert_plain": "Node availability changed\n\nInstance: Test instance\nPurpose: Monitoring\n\nAvailable nodes: 1 of 2\nActive route: Primary\n• Backup: available",
+  "node_alert_html": "<b>Node availability changed</b>\n\n<b>Instance:</b> Test instance\n<b>Purpose:</b> Monitoring\n\n<b>Available nodes:</b> 1 of 2\n<b>Active route:</b> Primary\n\n<b>Changed nodes</b>\nBackup: available",
+  "node_alert_plain": "Node availability changed\n\nInstance: Test instance\nPurpose: Monitoring\n\nAvailable nodes: 1 of 2\nActive route: Primary\n\nChanged nodes\nBackup: available",
   "event_heading": "Event time",
   "start_heading": "Service started",
   "purpose_label": "Purpose:",
@@ -18,5 +18,6 @@
   "outage_route": "Active route: stopped",
   "utc_event": "1970-01-01 00:03 UTC",
   "utc_start": "1970-01-01 00:01 UTC",
-  "server_label": "Server time:"
+  "server_label": "Server time:",
+  "node_states": "Node status"
 }

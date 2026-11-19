@@ -200,6 +200,28 @@ fn formats_each_event_in_both_languages_for_both_channels() {
 }
 
 #[test]
+fn a_single_healthy_node_is_named_once_in_the_snapshot() {
+    let mut event = Event {
+        kind: "snapshot".into(),
+        total: 1,
+        available: 1,
+        active: Some("Primary".into()),
+        changes: vec![("Primary".into(), true)],
+        ..Event::default()
+    };
+    let settings = Settings::default();
+    let one = Alert::from_event(&settings, &event, false).unwrap().html();
+    assert_eq!(one.matches("Primary").count(), 1);
+    event.total = 2;
+    event.changes.push(("Reserve".into(), false));
+    let two = Alert::from_event(&settings, &event, false).unwrap().html();
+    let expected = test_fixtures::messages(settings.language);
+    assert!(two.contains(&format!("\n\n<b>{}</b>\nPrimary:", expected["node_states"])));
+    assert!(two.contains("\nReserve:"));
+    assert!(!two.contains('•'));
+}
+
+#[test]
 fn keeps_large_snapshots_within_telegrams_limit_after_html_parsing() {
     let event = Event {
         kind: "snapshot".into(),
@@ -218,7 +240,10 @@ fn keeps_large_snapshots_within_telegrams_limit_after_html_parsing() {
         assert_eq!(visible, alert.text());
         assert!(visible.encode_utf16().count() <= 4096);
         assert_eq!(
-            visible.lines().filter(|line| line.starts_with('•')).count(),
+            visible
+                .lines()
+                .filter(|line| line.starts_with("<&𝄞>"))
+                .count(),
             5
         );
         assert!(visible.contains(&test_fixtures::messages(language)["truncated"]));

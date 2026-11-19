@@ -7,6 +7,8 @@ AlertText {
     unspecified: "unspecified",
     up: "available",
     down: "unavailable",
+    node_states: "Node status",
+    changed_nodes: "Changed nodes",
     unnamed: "unnamed node",
     more: "Additional nodes",
     stopped: "stopped",

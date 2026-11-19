@@ -9,6 +9,8 @@ pub struct AlertText {
     pub unspecified: &'static str,
     pub up: &'static str,
     pub down: &'static str,
+    pub node_states: &'static str,
+    pub changed_nodes: &'static str,
     pub unnamed: &'static str,
     pub more: &'static str,
     pub stopped: &'static str,

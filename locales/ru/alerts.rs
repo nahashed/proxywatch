@@ -7,6 +7,8 @@ AlertText {
     unspecified: "не указано",
     up: "доступен",
     down: "недоступен",
+    node_states: "Состояние узлов",
+    changed_nodes: "Изменения по узлам",
     unnamed: "узел без названия",
     more: "Ещё узлов",
     stopped: "остановлен",

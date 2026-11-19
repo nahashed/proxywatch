@@ -100,21 +100,35 @@ impl Alert {
             ));
         }
         nodes.push(Line::Field(words.route, route));
-        for (name, available) in event.changes.iter().take(5) {
-            let state = if *available { words.up } else { words.down };
-            nodes.push(Line::Text(format!(
-                "• {}: {state}",
-                safe_label(name, words.unnamed)
-            )));
-        }
-        if event.changes.len() > 5 {
-            nodes.push(Line::Field(
-                words.more,
-                (event.changes.len() - 5).to_string(),
-            ));
+        let mut sections = vec![vec![Line::Heading(summary)], identity, nodes];
+
+        let repeats_active = event.kind == "snapshot"
+            && event.total == 1
+            && event.available == 1
+            && matches!(event.changes.as_slice(), [(name, true)] if Some(name) == event.active.as_ref().or(event.to.as_ref()));
+        if !event.changes.is_empty() && !repeats_active {
+            let heading = if event.kind == "snapshot" {
+                words.node_states
+            } else {
+                words.changed_nodes
+            };
+            let mut details = vec![Line::Heading(heading)];
+            for (name, available) in event.changes.iter().take(5) {
+                let state = if *available { words.up } else { words.down };
+                details.push(Line::Text(format!(
+                    "{}: {state}",
+                    safe_label(name, words.unnamed)
+                )));
+            }
+            if event.changes.len() > 5 {
+                details.push(Line::Field(
+                    words.more,
+                    (event.changes.len() - 5).to_string(),
+                ));
+            }
+            sections.push(details);
         }
 
-        let mut sections = vec![vec![Line::Heading(summary)], identity, nodes];
         let time_block = |label, seconds| {
             let mut block = vec![Line::Heading(label)];
             if let Some((utc, local)) = crate::server_time::event_times(lang, seconds) {

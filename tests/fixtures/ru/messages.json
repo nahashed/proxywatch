@@ -9,8 +9,8 @@
   "recovery": "Соединение восстановлено",
   "truncated": "Ещё узлов: 495",
   "delayed": "Ранее все узлы были недоступны",
-  "node_alert_html": "<b>Доступность узла изменилась</b>\n\n<b>Установка:</b> Test instance\n<b>Назначение:</b> Monitoring\n\n<b>Доступно узлов:</b> 1 из 2\n<b>Активный маршрут:</b> Primary\n• Backup: доступен",
-  "node_alert_plain": "Доступность узла изменилась\n\nУстановка: Test instance\nНазначение: Monitoring\n\nДоступно узлов: 1 из 2\nАктивный маршрут: Primary\n• Backup: доступен",
+  "node_alert_html": "<b>Доступность узла изменилась</b>\n\n<b>Установка:</b> Test instance\n<b>Назначение:</b> Monitoring\n\n<b>Доступно узлов:</b> 1 из 2\n<b>Активный маршрут:</b> Primary\n\n<b>Изменения по узлам</b>\nBackup: доступен",
+  "node_alert_plain": "Доступность узла изменилась\n\nУстановка: Test instance\nНазначение: Monitoring\n\nДоступно узлов: 1 из 2\nАктивный маршрут: Primary\n\nИзменения по узлам\nBackup: доступен",
   "event_heading": "Время события",
   "start_heading": "Запуск службы",
   "purpose_label": "Назначение:",
@@ -18,5 +18,6 @@
   "outage_route": "Активный маршрут: остановлен",
   "utc_event": "01.01.1970 00:03 UTC",
   "utc_start": "01.01.1970 00:01 UTC",
-  "server_label": "На сервере:"
+  "server_label": "На сервере:",
+  "node_states": "Состояние узлов"
 }
