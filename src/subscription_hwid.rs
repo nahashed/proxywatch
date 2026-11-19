@@ -35,7 +35,10 @@ fn allows_redirect(next: &Url, previous: &[Url], enabled: bool) -> bool {
 pub fn request(client: &Client, url: Url, mode: &HwidMode) -> Result<RequestBuilder> {
     match mode {
         HwidMode::Toggle(false) => Ok(client.get(url)),
-        HwidMode::Custom(value) => request_with_header(client, url, value),
+        HwidMode::Custom(value) => {
+            mode.validate()?;
+            request_with_header(client, url, value)
+        }
         HwidMode::Toggle(true) => {
             prepare(client, url, true, || fs::read_to_string("/etc/machine-id"))
         }
@@ -77,6 +80,7 @@ fn prepare(
 }
 
 fn request_with_header(client: &Client, url: Url, value: &str) -> Result<RequestBuilder> {
+    ensure!(url.scheme() == "https", message!(hwid_https));
     let mut header = HeaderValue::from_str(value)?;
     header.set_sensitive(true);
     Ok(client.get(url).header("x-hwid", header))

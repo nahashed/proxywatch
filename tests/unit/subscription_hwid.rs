@@ -33,7 +33,7 @@ fn device_header_is_stable_and_scoped_to_the_https_origin() -> Result<()> {
 #[test]
 fn custom_hwid_is_sent_without_transformation() -> Result<()> {
     let client = Client::new();
-    let mode = crate::subscription_identity::HwidMode::Custom("cluster-main-01".into());
+    let mode = crate::subscription_identity::HwidMode::Custom("my-x-hwid-01".into());
     let request = request(
         &client,
         Url::parse("https://example.invalid/subscription")?,
@@ -41,8 +41,32 @@ fn custom_hwid_is_sent_without_transformation() -> Result<()> {
     )?
     .build()?;
     let header = &request.headers()["x-hwid"];
-    assert_eq!(header, "cluster-main-01");
+    assert_eq!(header, "my-x-hwid-01");
     assert!(header.is_sensitive());
+    Ok(())
+}
+
+#[test]
+fn custom_identifiers_are_checked_before_building_the_request() -> Result<()> {
+    let client = Client::new();
+    let https = Url::parse("https://example.invalid/sub")?;
+    for value in [
+        "a".repeat(9),
+        "b".repeat(65),
+        "invalid id-01".into(),
+        "invalid\r\nid".into(),
+        "данные-1234".into(),
+        "invalid_id-01".into(),
+    ] {
+        let mode = HwidMode::Custom(value.clone());
+        let error = request(&client, https.clone(), &mode).unwrap_err();
+        assert!(!error.to_string().contains(&value));
+    }
+    for value in ["azAZ09=-01".to_owned(), "a".repeat(64)] {
+        let mode = HwidMode::Custom(value);
+        assert!(request(&client, https.clone(), &mode).is_ok());
+        assert!(request(&client, Url::parse("http://example.invalid/sub")?, &mode).is_err());
+    }
     Ok(())
 }
 
@@ -190,7 +214,7 @@ fn custom_hwid_reaches_a_local_https_subscription_unchanged() -> Result<()> {
         .add_root_certificate(reqwest::Certificate::from_der(identity.cert.der())?)
         .redirect(redirect_policy(true))
         .build()?;
-    let mode = crate::subscription_identity::HwidMode::Custom("cluster-main-01".into());
+    let mode = crate::subscription_identity::HwidMode::Custom("my-x-hwid-01".into());
 
     let received = thread::scope(|scope| -> Result<_> {
         let server = scope.spawn(move || -> Result<_> {
@@ -228,6 +252,6 @@ fn custom_hwid_reaches_a_local_https_subscription_unchanged() -> Result<()> {
         );
         server.join().expect("TLS fixture panicked")
     })?;
-    assert_eq!(received.as_deref(), Some("cluster-main-01"));
+    assert_eq!(received.as_deref(), Some("my-x-hwid-01"));
     Ok(())
 }
