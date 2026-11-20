@@ -27,6 +27,20 @@ rules: [MATCH,DIRECT]
 }
 
 #[test]
+fn hysteria_client_fingerprint_does_not_override_certificate_pinning() {
+    let pin = "ac".repeat(32);
+    for protocol in ["hysteria2", "hy2"] {
+        let input = json!({"proxies":[{"name":"QUIC","server":"node.test","port":443,
+            "type":protocol,"password":"example","client-fingerprint":"chrome","fingerprint":pin}]});
+        let parsed = parse(&serde_json::to_vec(&input).unwrap()).unwrap();
+        assert!(parsed.skipped.is_empty());
+        let tls = &parsed.nodes[0].outbound["streamSettings"]["tlsSettings"];
+        assert_eq!(tls["pinnedPeerCertSha256"], pin);
+        assert!(tls.get("fingerprint").is_none());
+    }
+}
+
+#[test]
 fn saved_skip_reasons_follow_the_display_language() -> Result<()> {
     use crate::storage::{Paths, State};
 

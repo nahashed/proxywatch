@@ -113,7 +113,7 @@ def start_fixtures(stack):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Fixture)
         server.profile = json.dumps({"proxies": [{"type": "hysteria2", "name": "local fixture",
             "server": "127.0.0.1", "port": HYSTERIA, "password": "fixture-only",
-            "sni": "localhost", "alpn": ["h3"], "fingerprint": pin}]}).encode()
+            "sni": "localhost", "alpn": ["h3"], "fingerprint": pin, "client-fingerprint": "chrome"}]}).encode()
         threading.Thread(target=server.serve_forever, daemon=True).start()
         stack.callback(server.server_close)
         stack.callback(server.shutdown)

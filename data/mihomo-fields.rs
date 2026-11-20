@@ -17,6 +17,8 @@ pub(super) const VLESS: &[&str] = &[
 pub(super) const REALITY: &[&str] = &["public-key", "short-id", "support-x25519mlkem768"];
 
 pub(super) const HYSTERIA2: &[&str] = &[
+    // Some generators add this TCP/uTLS preference to every profile. Hysteria2 uses QUIC.
+    "client-fingerprint",
     "password",
     "sni",
     "alpn",
