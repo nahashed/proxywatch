@@ -101,7 +101,7 @@ pub fn external_bind_issues(
     if let Some(pid) = pid {
         issues.retain(|issue| {
             issue.kind != io::ErrorKind::AddrInUse
-                || !xray_listeners::owns_listeners(pid, Some(issue.port), None)
+                || !xray_listeners::owns_loopback_port(pid, issue.port)
         });
     }
     issues

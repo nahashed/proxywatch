@@ -415,6 +415,14 @@ fn identifies_a_real_listening_descriptor_and_its_accept_side_only() -> std::io:
     let mut report = port_reports([Some(address.port()), None], Some(&rows));
     listener_owners(&mut report, &rows);
     assert_eq!(report[0].clients, Some(1));
+    // A separate IPv4 address can bind the same number without owning the loopback endpoint.
+    let _other = TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), address.port()))?;
+    assert!(owns_loopback_port(std::process::id(), address.port()));
+    assert!(!owns_listeners(
+        std::process::id(),
+        Some(address.port()),
+        None
+    ));
     assert!(
         report[0]
             .owners

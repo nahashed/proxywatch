@@ -998,24 +998,43 @@ pub(crate) fn diagnose(http: Option<u16>, socks: Option<u16>) -> Inspection {
     }
 }
 
-pub(crate) fn owns_listeners(pid: u32, http: Option<u16>, socks: Option<u16>) -> bool {
-    fn check(pid: u32, http: Option<u16>, socks: Option<u16>) -> Option<bool> {
-        if !cfg!(target_os = "linux") || !valid_request(http, socks) {
-            return Some(false);
-        }
-        let process = Path::new("/proc").join(pid.to_string());
-        let owned = socket_inodes(&process)?;
-        same_namespace(&process).ok()?;
-        let rows = sockets()?;
-        Some([http, socks].into_iter().flatten().all(|port| {
-            let mut matching = rows.iter().filter(|row| row.listen && row.port == port);
-            matching
-                .next()
-                .is_some_and(|row| row.address == Address::Loopback && owned.contains(&row.inode))
-                && matching.next().is_none()
-        }))
+fn process_sockets(pid: u32) -> Option<(HashSet<u64>, Vec<Socket>)> {
+    if !cfg!(target_os = "linux") {
+        return None;
     }
-    check(pid, http, socks) == Some(true)
+    let process = Path::new("/proc").join(pid.to_string());
+    same_namespace(&process).ok()?;
+    Some((socket_inodes(&process)?, sockets()?))
+}
+
+fn unique_owned_loopback<'a>(
+    owned: &HashSet<u64>,
+    mut listeners: impl Iterator<Item = &'a Socket>,
+) -> bool {
+    listeners
+        .next()
+        .is_some_and(|row| row.address == Address::Loopback && owned.contains(&row.inode))
+        && listeners.next().is_none()
+}
+
+/// Used by the status screen: an unrelated address can legitimately use the same port number.
+pub(crate) fn owns_loopback_port(pid: u32, port: u16) -> bool {
+    process_sockets(pid).is_some_and(|(owned, rows)| {
+        unique_owned_loopback(
+            &owned,
+            rows.iter()
+                .filter(|r| r.listen && r.port == port && r.address != Address::Elsewhere),
+        )
+    })
+}
+
+pub(crate) fn owns_listeners(pid: u32, http: Option<u16>, socks: Option<u16>) -> bool {
+    valid_request(http, socks)
+        && process_sockets(pid).is_some_and(|(owned, rows)| {
+            [http, socks].into_iter().flatten().all(|port| {
+                unique_owned_loopback(&owned, rows.iter().filter(|r| r.listen && r.port == port))
+            })
+        })
 }
 
 #[cfg(test)]
