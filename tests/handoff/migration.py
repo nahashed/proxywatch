@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import pty
 import pwd
+import re
 import select
 import shutil
 import signal
@@ -165,10 +166,14 @@ def start_legacy(extra=False, foreign=False, restart_condition=None, http_only=F
 
 
 class Wizard:
+    def __init__(self, restricted=False):
+        self.prefix = ["/usr/bin/setpriv", "--bounding-set=-sys_ptrace"] if restricted else []
+
     def __enter__(self):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.execve(APP, [APP, "tui"], dict(os.environ, PROXYWATCH_INSTALL_SETUP="1",
+            argv = self.prefix + [APP, "tui"]
+            os.execve(argv[0], argv, dict(os.environ, PROXYWATCH_INSTALL_SETUP="1",
                 LANG="C.UTF-8", TERM="xterm-256color", HOME="/root"))
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 180, 0, 0))
         self.pending = bytearray()
@@ -221,6 +226,14 @@ class Wizard:
     def choose(self, label, keys="\r"):
         self.wait(label)
         self.send(keys)
+
+    def open_saved_conflict(self):
+        self.choose("Resolve port conflict", "jjjj\r")
+        self.wait("Local ports are in use")
+
+    def saved_handover(self):
+        self.open_saved_conflict()
+        self.choose("Test the subscription for handover", "jjj\r")
 
     def first_save(self):
         self.choose("Русский", "k\r")
@@ -301,6 +314,150 @@ def verify_system_setup(name):
     verify_traffic(b"upstream", settings["http_port"], settings["socks_port"])
 
 
+def check_live_connection(client):
+    client.sendall(b"GET /health HTTP/1.0\r\n\r\n")
+    response = http.client.HTTPResponse(client)
+    response.begin()
+    assert response.status == 200 and response.read() == b"direct"
+
+
+def assert_port_report(screen, port, owner, count):
+    text = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", screen).decode().replace("\r", "")
+    match = re.search(rf"^(?:HTTP|SOCKS5) 127\.0\.0\.1:{port}[^\n]*\n(.*?)(?=^(?:HTTP|SOCKS5) 127\.0\.0\.1:|\Z)",
+                      text, re.MULTILINE | re.DOTALL)
+    assert match, f"No diagnostic section for port {port}"
+    section = match.group(1)
+    if owner:
+        pid, name = owner
+        assert re.search(rf"Owner: {name}[^\n]*\bPID {pid}\b", section), section
+    else:
+        assert "Owner unavailable" in section, section
+    assert f"Connected clients: {count}\n" in section, section
+
+
+def saved_conflict(name, original, foreign):
+    SETTINGS.mkdir(mode=0o700, parents=True)
+    settings = SETTINGS / "settings.json"
+    saved = json.dumps({"language": "en", "instance_name": "Existing root setup",
+        "subscription_url": f"http://127.0.0.1:{DIRECT}/sub", "check_url": TARGET,
+        "diagnostic_urls": [], "xray_binary": XRAY})
+    settings.write_text(saved)
+    original_stat = settings.stat()
+
+    def assert_saved_unchanged():
+        current = settings.stat()
+        assert current.st_ino == original_stat.st_ino and current.st_mtime_ns == original_stat.st_mtime_ns
+        assert settings.read_text() == saved
+
+    if name == "saved-new-ports":
+        run("systemctl", "enable", "--now", "proxywatch.service")
+        wait_for("configured service to exhaust its start limit", lambda:
+                 property_of("proxywatch.service", "ActiveState") == "failed"
+                 and int(property_of("proxywatch.service", "NRestarts")) >= 3, 30)
+        new_http, new_socks = 11809, 11808
+        with Wizard() as wizard:
+            wizard.open_saved_conflict()
+            wizard.choose("Back to main menu")  # Choose other ports is the default.
+            wizard.choose("HTTP only")  # Keep both protocol inputs.
+            wizard.choose("SOCKS5 port", f"{new_socks}\r")
+            wizard.choose("HTTP port", f"{new_http}\r")
+            wizard.wait("Exit without saving")
+            assert_saved_unchanged()
+            wizard.send("\r")  # Save the draft.
+            wizard.wait("The Proxywatch system service is enabled and running.")
+        assert active("proxywatch.service") and enabled("proxywatch.service") == "enabled"
+        assert active("xray.service") and property_of("xray.service", "InvocationID") == original
+        applied = json.loads(settings.read_bytes())
+        assert (applied["http_port"], applied["socks_port"]) == (new_http, new_socks)
+        verify_traffic(b"upstream", new_http, new_socks)
+        verify_traffic(b"direct")
+        return
+    pid = property_of("xray.service", "MainPID")
+    owner = (pid, "xray")
+    if name == "saved-busy":
+        run("systemctl", "start", "proxywatch.service")
+        wait_for("failed bind in the existing installation", lambda:
+                 property_of("proxywatch.service", "SubState") == "auto-restart")
+    restricted = name == "saved-restricted"
+    if restricted:
+        # Root with restricted process visibility, as can happen inside a container.
+        probe = subprocess.run(["setpriv", "--bounding-set=-sys_ptrace", "readlink", f"/proc/{pid}/exe"],
+                               capture_output=True, timeout=5)
+        assert probe.returncode != 0
+    with contextlib.ExitStack() as stack:
+        clients = []
+        if name == "saved-busy":
+            for port in (SOCKS_PORT, SOCKS_PORT, HTTP_PORT):
+                client = stack.enter_context(socket.create_connection(("127.0.0.1", port), timeout=3))
+                if port == SOCKS_PORT:
+                    assert connect_socks(client)
+                else:
+                    client.sendall(f"CONNECT 127.0.0.1:{DIRECT} HTTP/1.1\r\nHost: 127.0.0.1:{DIRECT}\r\n\r\n".encode())
+                    with client.makefile("rb") as stream:
+                        assert stream.readline().split()[1] == b"200"
+                        while stream.readline().strip():
+                            pass
+                clients.append(client)
+        with Wizard(restricted=restricted) as wizard:
+            wizard.open_saved_conflict()
+            wizard.wait("Back to main menu")
+            screen = bytes(wizard.log).rsplit(b"Local ports are in use", 1)[-1]
+            if name == "saved-busy":
+                assert_port_report(screen, SOCKS_PORT, owner, 2)
+                assert_port_report(screen, HTTP_PORT, owner, 1)
+                assert b"Incoming TCP clients are still connected." in screen
+                wizard.choose("Test the subscription on a temporary port", "jjj\r")
+                wizard.wait("The subscription passed the check on a temporary port.")
+                wizard.wait("Back to main menu")
+                assert Fixture.requests[DIRECT, "/sub"] and Fixture.requests[UPSTREAM, "/health"]
+                assert_saved_unchanged()
+                assert active("xray.service") and property_of("xray.service", "InvocationID") == original
+                for client in clients:
+                    check_live_connection(client)
+                    client.close()
+                assert property_of("xray.service", "InvocationID") == original
+                wizard.send("j\r")
+                wizard.wait("Local ports are in use")
+                wizard.wait("Test the subscription for handover")
+                initial, clean = bytes(wizard.log).rsplit(b"Local ports are in use", 1)
+                assert b"Test the subscription for handover" not in initial
+                assert_port_report(clean, SOCKS_PORT, owner, 0)
+                assert_port_report(clean, HTTP_PORT, owner, 0)
+                wizard.send("jjj\r")
+                wizard.choose("How long should Proxywatch own these ports?")
+                wizard.wait("Temporarily stop xray.service")
+                assert property_of("xray.service", "InvocationID") == original
+                assert_saved_unchanged()
+                assert Fixture.requests[UPSTREAM, "/health"]
+                wizard.send("k\r")
+                wizard.wait("The Proxywatch system service is running", 75)
+                assert active("proxywatch.service") and not active("xray.service")
+                verify_traffic(b"upstream")
+            else:
+                blockers = {
+                    "saved-foreign": b"Another process listens on a selected TCP port.",
+                    "saved-changed": b"An Xray configuration file or directory changed after the service started.",
+                    "saved-restricted": b"Cannot confirm that the main process of xray.service runs the xray executable.",
+                }
+                assert blockers[name] in screen, screen
+                assert_port_report(screen, SOCKS_PORT, None if restricted else owner, 0)
+                http_owner = (os.getpid(), "python3") if foreign else owner
+                assert_port_report(screen, HTTP_PORT, None if restricted else http_owner, 0)
+                wizard.send("jj\r")
+                wizard.wait("Close menu")
+                assert b"Test the subscription for handover" not in wizard.log
+                assert not Fixture.requests[DIRECT, "/sub"]
+                assert_saved_unchanged()
+                assert property_of("xray.service", "InvocationID") == original
+                assert active("xray.service") and not active("proxywatch.service")
+                if foreign:
+                    with socket.create_connection(foreign.getsockname(), timeout=2) as client:
+                        peer, _ = foreign.accept()
+                        with peer:
+                            peer.sendall(b"foreign")
+                            assert client.recv(7, socket.MSG_WAITALL) == b"foreign"
+
+
 def scenario(name, upstream_config):
     reset()
     Fixture.requests.clear()
@@ -320,16 +477,18 @@ def scenario(name, upstream_config):
                 upstream.wait(timeout=5)
         stack.callback(stop_upstream)
         wait_for("local Hysteria2 fixture to listen", upstream_ready)
-        if name in ("foreground", "manager-change") or name.startswith("system-"):
+        system_scope = name.startswith(("system-", "saved-"))
+        if name in ("foreground", "manager-change") or system_scope:
             run("systemctl", "stop", "user@0.service")
             stack.callback(run, "systemctl", "start", "user@0.service")
-        if name.startswith("system-"):
+        if system_scope:
             stack.enter_context(packaged_system_unit())
         if name in ("system-first-save", "system-saved"):
             verify_system_setup(name)
             print(f"PASS system service: {name}", flush=True)
             return
-        foreign = name == "foreign"
+        foreign = name in ("foreign", "saved-foreign")
+        other = None
         if foreign:
             other = stack.enter_context(socket.socket())
             other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -340,7 +499,16 @@ def scenario(name, upstream_config):
             condition.touch()
         start_legacy(extra=name == "extra", foreign=foreign, restart_condition=condition)
         original = property_of("xray.service", "InvocationID")
+        if name == "saved-changed":
+            with CONFIG.open("ab") as changed:
+                changed.write(b"\n")
         old_files = (CONFIG.read_bytes(), UNIT.read_bytes())
+        if name.startswith("saved-"):
+            saved_conflict(name, original, other)
+            assert enabled("xray.service") == "enabled"
+            assert (CONFIG.read_bytes(), UNIT.read_bytes()) == old_files
+            print(f"PASS saved port conflict: {name}", flush=True)
+            return
         if name == "busy":
             connection = stack.enter_context(socket.create_connection(("127.0.0.1", SOCKS_PORT), timeout=2))
             assert connect_socks(connection)
@@ -351,6 +519,12 @@ def scenario(name, upstream_config):
             wizard.wait("Return to settings")
             takeover = "Test the subscription for handover"
             if name in ("busy", "extra", "foreign"):
+                if name == "busy":
+                    wizard.choose("Test the subscription on a temporary port", "jjj\r")
+                    wizard.wait("The subscription passed the check on a temporary port.")
+                    wizard.wait("Return to settings")
+                    assert Fixture.requests[UPSTREAM, "/health"]
+                    assert not (SETTINGS / "settings.json").exists()
                 # Leave the conflict screen before inspecting its fully rendered choice list.
                 wizard.send("jj\r")
                 wizard.wait("Exit without saving")
@@ -359,12 +533,12 @@ def scenario(name, upstream_config):
                 assert property_of("xray.service", "ActiveState") == "active"
                 assert not (SETTINGS / "settings.json").exists()
                 if name == "busy":
-                    assert b"xray.service has active connections" in wizard.log
-                    connection.sendall(b"GET /health HTTP/1.0\r\n\r\n")
-                    reply = http.client.HTTPResponse(connection)
-                    reply.begin()
-                    assert reply.read() == b"direct"
+                    assert b"Incoming TCP clients are still connected." in wizard.log
+                    check_live_connection(connection)
+                if name == "extra":
+                    assert b"The Xray configuration declares additional or duplicate proxy listeners." in wizard.log
                 if foreign:
+                    assert b"Another process listens on a selected TCP port." in wizard.log
                     assert other.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 1
             elif name == "probe-failure":
                 stop_upstream()
@@ -402,10 +576,7 @@ def scenario(name, upstream_config):
                     wizard.wait("The port owner, connections or settings changed.")
                     assert property_of("xray.service", "InvocationID") == original
                     assert not (SETTINGS / "settings.json").exists()
-                    connection.sendall(b"GET /health HTTP/1.0\r\n\r\n")
-                    reply = http.client.HTTPResponse(connection)
-                    reply.begin()
-                    assert reply.read() == b"direct"
+                    check_live_connection(connection)
                 elif name == "restore-failed":
                     wait_for("replacement started", lambda: active("proxywatch.service", user=True))
                     wizard.send("\x03")
@@ -443,7 +614,7 @@ def scenario(name, upstream_config):
             saved = (SETTINGS / "settings.json").read_bytes()
             restored = property_of("xray.service", "InvocationID")
             with Wizard() as wizard:
-                wizard.choose("Hand over Xray ports", "jjjj\r")
+                wizard.saved_handover()
                 wizard.choose("Temporarily stop xray.service", "\r")
                 wizard.wait("Close menu")
                 assert (SETTINGS / "settings.json").read_bytes() == saved
@@ -491,7 +662,7 @@ def permanent(name, config):
     upstream = subprocess.Popen([XRAY, "run", "-config", str(config)])
     try:
         with Wizard() as wizard:
-            wizard.choose("Hand over Xray ports", "jjjj\r")
+            wizard.saved_handover()
             wizard.choose("How long should Proxywatch own these ports?", "j\r")
             wizard.wait("Transfer these ports to Proxywatch permanently")
             assert enabled("xray.service") == "enabled" and active("xray.service")
@@ -570,6 +741,7 @@ def main():
         config = start_fixtures(stack)
         scenarios = ("busy", "foreign", "extra", "probe-failure", "late-client", "success", "rollback", "restore-failed", "foreground",
                      "manager-change", "system-handover", "system-first-save", "system-saved",
+                     "saved-busy", "saved-foreign", "saved-changed", "saved-restricted", "saved-new-ports",
                      "system-permanent-rollback", "system-permanent-failed", "system-permanent")
         selected = sys.argv[1:] or scenarios
         for name in sorted(selected, key=lambda item: item == "system-permanent"):
