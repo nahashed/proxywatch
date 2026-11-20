@@ -39,7 +39,7 @@ fn only_explicit_local_plain_unauthenticated_tcp_inbounds_qualify() {
     let valid = |value| {
         serde_json::from_value(value)
             .ok()
-            .and_then(|inbound| Ports::default().add(inbound))
+            .and_then(|inbound| Ports::default().add(inbound).ok())
             .is_some()
     };
     assert!(valid(base.clone()));
@@ -102,10 +102,12 @@ fn distinguishes_owned_listeners_from_other_sockets_and_active_traffic() {
     let http = Socket {
         inode: 90,
         port: 10809,
-        local: true,
+        address: Address::Loopback,
         listen: true,
         udp: false,
         active: false,
+        incoming: false,
+        closing: false,
     };
     let socks = Socket {
         inode: 80,
@@ -113,15 +115,15 @@ fn distinguishes_owned_listeners_from_other_sockets_and_active_traffic() {
         ..http
     };
     let inspect = |rows: &[Socket]| check_sockets(&owned, rows, &declared, selected);
-    assert_eq!(inspect(&[http, socks]), Some(false));
-    assert_eq!(inspect(&[http]), None);
+    assert_eq!(inspect(&[http, socks]), Ok(None));
+    assert_eq!(inspect(&[http]), Err(Blocker::SocketMismatch));
     for invalid in [
         Socket {
             inode: 777,
             ..socks
         },
         Socket {
-            local: false,
+            address: Address::AnyV4,
             ..socks
         },
         Socket {
@@ -130,7 +132,7 @@ fn distinguishes_owned_listeners_from_other_sockets_and_active_traffic() {
             ..socks
         },
     ] {
-        assert_eq!(inspect(&[http, invalid]), None);
+        assert!(inspect(&[http, invalid]).is_err());
     }
     for extra in [
         Socket {
@@ -153,38 +155,50 @@ fn distinguishes_owned_listeners_from_other_sockets_and_active_traffic() {
             ..http
         },
     ] {
-        assert_eq!(inspect(&[http, socks, extra]), None);
+        assert!(inspect(&[http, socks, extra]).is_err());
     }
-    for active in [
-        Socket {
-            port: 58000,
-            inode: 500,
-            listen: false,
-            active: true,
-            ..http
-        }, // outgoing
-        Socket {
-            inode: 500,
-            listen: false,
-            active: true,
-            ..http
-        }, // accepted
-        Socket {
-            inode: 0,
-            listen: false,
-            active: true,
-            ..http
-        }, // not yet accepted
-    ] {
-        assert_eq!(inspect(&[http, socks, active]), Some(true));
-    }
+    let flow = Socket {
+        inode: 500,
+        listen: false,
+        active: true,
+        incoming: true,
+        ..http
+    };
+    assert_eq!(inspect(&[http, socks, flow]), Ok(Some(Blocker::Clients)));
+    assert_eq!(
+        inspect(&[http, socks, Socket { inode: 0, ..flow }]),
+        Ok(Some(Blocker::Clients))
+    );
+    assert_eq!(
+        inspect(&[
+            http,
+            socks,
+            Socket {
+                port: 58000,
+                ..flow
+            }
+        ]),
+        Ok(Some(Blocker::OtherTraffic))
+    );
+    assert_eq!(
+        inspect(&[
+            http,
+            socks,
+            Socket {
+                incoming: false,
+                closing: true,
+                ..flow
+            }
+        ]),
+        Ok(Some(Blocker::Closing))
+    );
     let time_wait = Socket {
         inode: 0,
         listen: false,
         active: false,
         ..http
     };
-    assert_eq!(inspect(&[http, socks, time_wait]), Some(false));
+    assert_eq!(inspect(&[http, socks, time_wait]), Ok(None));
 }
 
 #[test]
@@ -212,21 +226,33 @@ fn reads_explicit_json_fragments_and_refuses_ambiguous_disk_state() -> std::io::
         br#"{"outbounds":[{"protocol":"freedom"}],"routing":{"rules":[]}}"#,
     )?;
     assert_eq!(
-        configuration(&process, u64::MAX).and_then(|p| p.http),
+        configuration(&process, u64::MAX).ok().and_then(|p| p.http),
         Some(10808)
     );
-    assert!(configuration(&process, 0).is_none());
+    assert_eq!(
+        configuration(&process, 0).err(),
+        Some(Blocker::ConfigChanged)
+    );
     fs::write(
         process.join("environ"),
         b"XRAY_LOCATION_CONFDIR=/var/lib/x\0",
     )?;
-    assert!(configuration(&process, u64::MAX).is_none());
+    assert_eq!(
+        configuration(&process, u64::MAX).err(),
+        Some(Blocker::ConfigSource)
+    );
     fs::write(process.join("environ"), b"")?;
     symlink(&http, fragments.join("20-alias.json"))?;
-    assert!(configuration(&process, u64::MAX).is_none());
+    assert_eq!(
+        configuration(&process, u64::MAX).err(),
+        Some(Blocker::ConfigIdentity)
+    );
     fs::remove_file(fragments.join("20-alias.json"))?;
     fs::write(fragments.join("20-policy.yaml"), "api: {}")?;
-    assert!(configuration(&process, u64::MAX).is_none());
+    assert_eq!(
+        configuration(&process, u64::MAX).err(),
+        Some(Blocker::ConfigFormat)
+    );
     Ok(())
 }
 
@@ -253,4 +279,147 @@ fn manual_stop_requires_known_empty_stop_dependencies() {
     }
     fields.insert("RefuseManualStop", "yes");
     assert!(!independently_stoppable(&fields));
+}
+
+#[test]
+fn socket_counts_separate_live_clients_from_closing_connections() {
+    let listener = Socket {
+        inode: 12,
+        port: 10808,
+        address: Address::Loopback,
+        listen: true,
+        udp: false,
+        active: false,
+        incoming: false,
+        closing: false,
+    };
+    let established = Socket {
+        inode: 13,
+        listen: false,
+        active: true,
+        incoming: true,
+        ..listener
+    };
+    let closing = Socket {
+        inode: 14,
+        incoming: false,
+        closing: true,
+        ..established
+    };
+    let time_wait = Socket {
+        inode: 0,
+        active: false,
+        ..closing
+    };
+    let outgoing = Socket {
+        inode: 15,
+        port: 54321,
+        ..established
+    };
+    let another_interface = Socket {
+        address: Address::Elsewhere,
+        ..established
+    };
+    let wildcard = Socket {
+        address: Address::AnyV4,
+        ..listener
+    };
+    let rows = [
+        wildcard,
+        established,
+        closing,
+        time_wait,
+        outgoing,
+        another_interface,
+    ];
+    let reports = port_reports([Some(10808), Some(10809)], Some(&rows));
+    assert_eq!(
+        (reports[0].listening, reports[0].clients, reports[0].closing),
+        (Some(true), Some(1), Some(2))
+    );
+    assert_eq!(
+        (reports[1].listening, reports[1].clients, reports[1].closing),
+        (Some(false), Some(0), Some(0))
+    );
+    for (address, expected) in [(Address::Elsewhere, Some(false)), (Address::AnyV6, None)] {
+        let listener = Socket {
+            address,
+            ..listener
+        };
+        let report = port_reports(
+            [Some(listener.port), None],
+            Some(&[listener, another_interface]),
+        );
+        assert_eq!(
+            (report[0].listening, report[0].clients),
+            (expected, Some(0))
+        );
+    }
+    let unknown = port_reports([Some(10808), None], None);
+    assert_eq!((unknown[0].listening, unknown[0].clients), (None, None));
+}
+
+#[test]
+fn maps_a_delegated_unified_cgroup_through_the_container_mount_root() {
+    let mountinfo = "38 27 0:31 /lxc/ct.ns /sys/fs/cgroup ro,nosuid,nodev - cgroup2 cgroup rw";
+    let unit = Path::new("/lxc/ct.ns/system.slice/xray.service");
+    let candidates = cgroup_directories(unit, mountinfo);
+    assert_eq!(
+        candidates.first().unwrap(),
+        Path::new("/sys/fs/cgroup/system.slice/xray.service")
+    );
+    let unit = Path::new("/system.slice/xray.service");
+    assert_eq!(
+        cgroup_directories(unit, mountinfo),
+        [PathBuf::from("/sys/fs/cgroup/system.slice/xray.service")]
+    );
+    assert!(cgroup_directories(unit, "38 27 0:31 / /sys/fs/cgroup rw - tmpfs tmpfs rw").is_empty());
+}
+
+#[test]
+fn decodes_loopback_wildcards_and_unrelated_interface_addresses() {
+    fn encoded(bytes: &[u8]) -> String {
+        bytes
+            .chunks_exact(4)
+            .map(|word| format!("{:08X}", u32::from_ne_bytes(word.try_into().unwrap())))
+            .collect()
+    }
+    for (v4, expected) in [
+        (Ipv4Addr::LOCALHOST, Address::Loopback),
+        (Ipv4Addr::UNSPECIFIED, Address::AnyV4),
+        (Ipv4Addr::new(127, 0, 0, 2), Address::Elsewhere),
+    ] {
+        assert_eq!(Address::from_proc(&encoded(&v4.octets())), Some(expected));
+    }
+    for (v6, expected) in [
+        (
+            Ipv4Addr::LOCALHOST.to_ipv6_mapped(),
+            Address::MappedLoopback,
+        ),
+        (Ipv6Addr::LOCALHOST, Address::Elsewhere),
+        (Ipv6Addr::UNSPECIFIED, Address::AnyV6),
+    ] {
+        assert_eq!(Address::from_proc(&encoded(&v6.octets())), Some(expected));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn identifies_a_real_listening_descriptor_and_its_accept_side_only() -> std::io::Result<()> {
+    use std::net::{TcpListener, TcpStream};
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+    let _client = TcpStream::connect(address)?;
+    let (_accepted, _) = listener.accept()?;
+    let rows = sockets().unwrap();
+    let mut report = port_reports([Some(address.port()), None], Some(&rows));
+    listener_owners(&mut report, &rows);
+    assert_eq!(report[0].clients, Some(1));
+    assert!(
+        report[0]
+            .owners
+            .iter()
+            .any(|owner| owner.pid == std::process::id())
+    );
+    Ok(())
 }

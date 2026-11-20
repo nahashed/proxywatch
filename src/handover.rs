@@ -49,12 +49,91 @@ pub fn available(paths: &Paths, explicit_directory: bool) -> bool {
         && paths.lock().is_ok()
 }
 
-pub fn conflicts(settings: &Settings) -> Vec<u16> {
+pub struct BindIssue {
+    pub port: u16,
+    pub kind: io::ErrorKind,
+}
+
+fn bind_issues(settings: &Settings) -> Vec<BindIssue> {
     [settings.http_port, settings.socks_port]
         .into_iter()
         .flatten()
-        .filter(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).is_err())
+        .filter_map(|port| {
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+                .err()
+                .map(|error| BindIssue {
+                    port,
+                    kind: error.kind(),
+                })
+        })
         .collect()
+}
+
+pub fn conflicts(settings: &Settings) -> Vec<u16> {
+    bind_issues(settings)
+        .into_iter()
+        .map(|issue| issue.port)
+        .collect()
+}
+
+pub fn external_bind_issues(
+    paths: &Paths,
+    settings: &Settings,
+    explicit_directory: bool,
+) -> Vec<BindIssue> {
+    let mut issues = bind_issues(settings);
+    if !issues
+        .iter()
+        .any(|issue| issue.kind == io::ErrorKind::AddrInUse)
+        || !paths.has_settings()
+        || !fs::File::open(paths.directory().join("daemon.lock")).is_ok_and(|file| {
+            fs2::FileExt::try_lock_shared(&file)
+                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+        })
+    {
+        return issues;
+    }
+    let pid = lock_owner_pid(paths).or_else(|| {
+        UserService::installed(paths.directory(), explicit_directory)
+            .filter(|service| service.active())
+            .and_then(|service| service.pid())
+    });
+    if let Some(pid) = pid {
+        issues.retain(|issue| {
+            issue.kind != io::ErrorKind::AddrInUse
+                || !xray_listeners::owns_listeners(pid, Some(issue.port), None)
+        });
+    }
+    issues
+}
+
+#[cfg(target_os = "linux")]
+fn lock_owner_pid(paths: &Paths) -> Option<u32> {
+    // Linux exposes the PID holding this installation's flock, including a foreground monitor.
+    let metadata = fs::metadata(paths.directory().join("daemon.lock")).ok()?;
+    let locks = fs::read_to_string("/proc/locks").ok()?;
+    let pid = locks.lines().find_map(|row| {
+        let mut fields = row.split_ascii_whitespace().skip(1);
+        if fields.next()? != "FLOCK" || fields.next()? != "ADVISORY" || fields.next()? != "WRITE" {
+            return None;
+        }
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        let mut file = fields.next()?.split(':');
+        (u32::from_str_radix(file.next()?, 16).ok()? == nix::libc::major(metadata.dev())
+            && u32::from_str_radix(file.next()?, 16).ok()? == nix::libc::minor(metadata.dev())
+            && file.next()?.parse::<u64>().ok()? == metadata.ino())
+        .then_some(pid)
+    })?;
+    let owner = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let program = env::current_exe().ok()?;
+    let executable = owner.as_os_str().as_encoded_bytes();
+    let path = executable.strip_suffix(b" (deleted)").unwrap_or(executable);
+    (path == program.as_os_str().as_encoded_bytes()).then_some(pid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_owner_pid(_: &Paths) -> Option<u32> {
+    None
 }
 
 // The TUI and the monitor are separate processes. Defer terminal signals during the

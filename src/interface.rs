@@ -69,16 +69,13 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
             tui!(ui.language, history),
             tui!(ui.language, settings),
         ];
-        let listeners = if crate::handover::available(paths, explicit_directory)
-            && !crate::handover::conflicts(&settings).is_empty()
-        {
-            crate::xray_listeners::inspect(settings.http_port, settings.socks_port)
-                .filter(|listeners| !listeners.busy)
-        } else {
-            None
-        };
-        if listeners.is_some() {
-            actions.push(tui!(ui.language, hand_over_ports));
+        let issues = crate::handover::external_bind_issues(paths, &settings, explicit_directory);
+        if !issues.is_empty() {
+            ui.line(ui.issue_title(&issues))?;
+            for issue in &issues {
+                ui.line(&configured_endpoint(&settings, issue.port))?;
+            }
+            actions.push(tui!(ui.language, resolve_ports));
         }
         actions.push(tui!(ui.language, close));
         match ui.select(tui!(ui.language, action), &actions, 0)? {
@@ -86,13 +83,22 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
             Some(1) => ui.nodes(&state)?,
             Some(2) => ui.history(&settings, &state)?,
             Some(3) => {
-                ui.edit(paths, settings, false)?;
+                ui.edit(paths, settings.clone(), Some(&settings))?;
             }
-            Some(4) => {
-                let Some(listeners) = listeners else {
-                    return Ok(());
-                };
-                ui.handover(paths, &settings, &listeners, Some(&settings))?;
+            Some(4) if !issues.is_empty() => {
+                let mut draft = settings.clone();
+                match ui.resolve_port_conflict(paths, &mut draft, Some(&settings), true)? {
+                    PortAction::Edit => {
+                        ui.edit(paths, draft, Some(&settings))?;
+                    }
+                    PortAction::Free => {
+                        ui.line(tui!(ui.language, ports_free))?;
+                        if ui.confirm(tui!(ui.language, apply_saved), false)? {
+                            ui.save(paths, &mut draft, Some(&settings))?;
+                        }
+                    }
+                    PortAction::Back | PortAction::Applied => (),
+                }
             }
             _ => return Ok(()),
         }
@@ -100,7 +106,8 @@ pub fn run(paths: &Paths, explicit_directory: bool) -> Result<()> {
 }
 
 enum PortAction {
-    Retry,
+    Free,
+    Back,
     Edit,
     Applied,
 }
@@ -238,10 +245,15 @@ impl Interface {
         }
         self.line(tui!(self.language, notification_intro))?;
         self.notifications(&mut settings)?;
-        self.edit(paths, settings, true)
+        self.edit(paths, settings, None)
     }
 
-    fn edit(&mut self, paths: &Paths, mut settings: Settings, first_setup: bool) -> Result<bool> {
+    fn edit(
+        &mut self,
+        paths: &Paths,
+        mut settings: Settings,
+        previous: Option<&Settings>,
+    ) -> Result<bool> {
         loop {
             self.screen(tui!(self.language, settings_title))?;
             self.line(&display_text(&settings.instance_name))?;
@@ -279,7 +291,7 @@ impl Interface {
                         self.pause()?;
                         continue;
                     }
-                    if self.save(paths, &mut settings, first_setup)? {
+                    if self.save(paths, &mut settings, previous)? {
                         return Ok(true);
                     }
                 }
@@ -310,33 +322,45 @@ impl Interface {
         }
     }
 
-    fn save(&self, paths: &Paths, settings: &mut Settings, first_setup: bool) -> Result<bool> {
+    fn save(
+        &self,
+        paths: &Paths,
+        settings: &mut Settings,
+        previous: Option<&Settings>,
+    ) -> Result<bool> {
         use crate::user_service::{Applied, Scope, UserService, foreground_command};
 
-        if first_setup {
-            loop {
-                let conflicts = crate::handover::conflicts(settings);
-                if conflicts.is_empty() {
-                    break;
-                }
-                match self.resolve_port_conflict(paths, settings, &conflicts)? {
-                    PortAction::Retry => continue,
-                    PortAction::Edit => return Ok(false),
-                    PortAction::Applied => return Ok(true),
-                }
-            }
+        match self.resolve_port_conflict(paths, settings, previous, false)? {
+            PortAction::Free => (),
+            PortAction::Back | PortAction::Edit => return Ok(false),
+            PortAction::Applied => return Ok(true),
         }
-
+        let first_setup = previous.is_none();
         let service = UserService::installed(paths.directory(), self.explicit_directory);
         let xray_ready = self.resolve_xray(settings)?;
         if !xray_ready && service.is_some() {
             self.pause()?;
             return Ok(false);
         }
-        if first_setup {
-            paths.try_first_settings(settings, || Ok(()))?;
+        if !crate::handover::external_bind_issues(paths, settings, self.explicit_directory)
+            .is_empty()
+        {
+            match self.resolve_port_conflict(paths, settings, previous, false)? {
+                PortAction::Free => (),
+                PortAction::Back | PortAction::Edit => return Ok(false),
+                PortAction::Applied => return Ok(true),
+            }
+        }
+        if let Some(expected) = previous {
+            paths.update_settings(|| {
+                ensure!(
+                    paths.load_settings()? == *expected,
+                    tui!(self.language, draft_changed)
+                );
+                Ok(settings.clone())
+            })?;
         } else {
-            paths.save_settings(settings)?;
+            paths.try_first_settings(settings, || Ok(()))?;
         }
         let outcome = if let Some(service) = service {
             let scope = service.scope();
@@ -420,52 +444,161 @@ impl Interface {
         Ok(true)
     }
 
+    fn issue_title(&self, issues: &[crate::handover::BindIssue]) -> &'static str {
+        if issues
+            .iter()
+            .all(|issue| issue.kind == std::io::ErrorKind::AddrInUse)
+        {
+            tui!(self.language, ports_in_use)
+        } else {
+            tui!(self.language, ports_unavailable)
+        }
+    }
+
     fn resolve_port_conflict(
         &self,
         paths: &Paths,
-        settings: &mut Settings,
-        conflicts: &[u16],
+        draft: &mut Settings,
+        previous: Option<&Settings>,
+        from_main: bool,
     ) -> Result<PortAction> {
-        self.screen(tui!(self.language, ports_in_use))?;
-        for port in conflicts {
-            self.line(&tui!(self.language, occupied_address, port))?;
-        }
-        let mut choices = vec![
-            tui!(self.language, change_ports),
-            tui!(self.language, retry_ports),
-            tui!(self.language, return_to_settings),
-        ];
-        let inspected = if crate::handover::available(paths, self.explicit_directory) {
-            let inspected = crate::xray_listeners::inspect(settings.http_port, settings.socks_port);
-            if let Some(listeners) = &inspected {
-                self.line(&tui!(self.language, detected_listeners, listeners.pid))?;
-                self.line(&ports_label(listeners.http, listeners.socks))?;
-                if listeners.busy {
-                    self.line(tui!(self.language, listeners_busy))?;
+        use std::io::ErrorKind;
+        let mut probe_result: Option<String> = None;
+        loop {
+            let issues =
+                crate::handover::external_bind_issues(paths, draft, self.explicit_directory);
+            if issues.is_empty() {
+                if let Some(result) = probe_result {
+                    // A read-only test never falls through to Save if the conflict vanished meanwhile.
+                    self.screen(tui!(self.language, ports_free))?;
+                    self.line(&result)?;
+                    self.pause()?;
+                    return Ok(PortAction::Back);
+                }
+                return Ok(PortAction::Free);
+            }
+            self.screen(self.issue_title(&issues))?;
+            if let Some(result) = probe_result.take() {
+                self.line(&result)?;
+            }
+            let inspection = issues
+                .iter()
+                .any(|issue| issue.kind == ErrorKind::AddrInUse)
+                .then(|| crate::xray_listeners::diagnose(draft.http_port, draft.socks_port));
+            for issue in &issues {
+                self.line(&configured_endpoint(draft, issue.port))?;
+                if issue.kind == ErrorKind::AddrInUse {
+                    let report = inspection.as_ref().and_then(|report| {
+                        report.ports.iter().find(|entry| entry.port == issue.port)
+                    });
+                    self.port_owner(report)?;
+                } else if issue.kind == ErrorKind::PermissionDenied {
+                    self.line(tui!(self.language, bind_permission))?;
                 } else {
-                    choices.push(tui!(self.language, test_handover));
+                    self.line(tui!(self.language, bind_unavailable))?;
                 }
-            } else {
-                self.line(tui!(self.language, unknown_listeners))?;
             }
-            inspected
-        } else {
-            None
-        };
-        match self.select(tui!(self.language, action), &choices, 0)? {
-            Some(0) => {
-                self.ports(settings)?;
-                Ok(PortAction::Edit)
-            }
-            Some(1) => Ok(PortAction::Retry),
-            Some(3) => {
-                if let Some(listeners) = inspected.filter(|item| !item.busy) {
-                    return self.handover(paths, settings, &listeners, None);
+            let mut choices = vec![
+                tui!(self.language, change_ports),
+                tui!(self.language, retry_ports),
+                if from_main {
+                    tui!(self.language, back_to_main)
+                } else {
+                    tui!(self.language, return_to_settings)
+                },
+            ];
+            let mut handover = None;
+            if let Some(report) = &inspection {
+                if let Some(count) = report.other_flows.filter(|&count| count != 0) {
+                    self.line(&tui!(self.language, other_connections, count))?;
                 }
-                Ok(PortAction::Edit)
+                if let Some(listeners) = &report.listeners {
+                    self.line(&tui!(self.language, detected_listeners, listeners.pid))?;
+                    self.line(&ports_label(listeners.http, listeners.socks))?;
+                }
+                if let Some(blocker) = report.blocker {
+                    self.line(blocker.message())?;
+                } else if let Some(listeners) = report.listeners.filter(|listeners| !listeners.busy)
+                    && issues
+                        .iter()
+                        .all(|issue| issue.kind == ErrorKind::AddrInUse)
+                {
+                    if crate::handover::available(paths, self.explicit_directory) {
+                        handover = Some(listeners);
+                        choices.push(tui!(self.language, test_handover));
+                    } else {
+                        self.line(tui!(self.language, handover_scope))?;
+                    }
+                }
             }
-            _ => Ok(PortAction::Edit),
+            let probe =
+                if inspection.is_some() && cfg!(target_os = "linux") && draft.validate().is_ok() {
+                    crate::xray_binary::inspect_binary(&draft.xray_binary)
+                } else {
+                    None
+                };
+            let probe_action = choices.len();
+            if probe.is_some() {
+                choices.push(tui!(self.language, test_separately));
+            }
+            match self.select(tui!(self.language, action), &choices, 0)? {
+                Some(0) => {
+                    if self.ports(draft)? {
+                        return Ok(PortAction::Edit);
+                    }
+                }
+                Some(1) => (),
+                Some(action) if action == probe_action && probe.is_some() => {
+                    let mut test = draft.clone();
+                    if let Some(path) = probe.as_ref().and_then(|(path, _)| path.to_str()) {
+                        test.xray_binary = path.to_owned();
+                    }
+                    self.line(tui!(self.language, temporary_probe))?;
+                    probe_result = Some(match crate::handover::verify_route(&test) {
+                        Ok(()) => tui!(self.language, temporary_passed).to_owned(),
+                        Err(error) => error.to_string(),
+                    });
+                }
+                Some(3) if handover.is_some() => {
+                    if let Some(listeners) = handover {
+                        return self.handover(paths, draft, &listeners, previous);
+                    }
+                }
+                _ => return Ok(PortAction::Back),
+            }
         }
+    }
+
+    fn port_owner(&self, report: Option<&crate::xray_listeners::PortReport>) -> Result<()> {
+        if let Some(report) = report
+            && !report.owners.is_empty()
+        {
+            for owner in &report.owners {
+                if let Some(name) = &owner.name {
+                    self.line(&tui!(
+                        self.language,
+                        port_owner,
+                        display_text(name),
+                        owner.pid
+                    ))?;
+                } else {
+                    self.line(&tui!(self.language, owner_pid, owner.pid))?;
+                }
+            }
+        } else if report.is_some_and(|entry| entry.listening == Some(false)) {
+            self.line(tui!(self.language, no_listener))?;
+        } else {
+            self.line(tui!(self.language, owner_unknown))?;
+        }
+        if let Some(clients) = report.and_then(|entry| entry.clients) {
+            self.line(&tui!(self.language, client_count, clients))?;
+        } else {
+            self.line(tui!(self.language, clients_unknown))?;
+        }
+        if let Some(closing) = report.and_then(|entry| entry.closing).filter(|&n| n != 0) {
+            self.line(&tui!(self.language, closing_count, closing))?;
+        }
+        Ok(())
     }
 
     fn handover(
@@ -481,21 +614,21 @@ impl Interface {
         candidate.socks_port = listeners.socks;
         if !self.resolve_xray(&mut candidate)? {
             self.pause()?;
-            return Ok(PortAction::Edit);
+            return Ok(PortAction::Back);
         }
         let mode = StartMode::detect(paths, self.explicit_directory);
         self.line(tui!(self.language, checking_handover))?;
         if let Err(error) = verify_route(&candidate) {
             self.line(&error.to_string())?;
             self.pause()?;
-            return Ok(PortAction::Edit);
+            return Ok(PortAction::Back);
         }
         self.line(tui!(self.language, route_verified))?;
         self.line(&ports_label(candidate.http_port, candidate.socks_port))?;
         if StartMode::detect(paths, self.explicit_directory) != mode {
             self.line(tui!(self.language, manager_changed))?;
             self.pause()?;
-            return Ok(PortAction::Edit);
+            return Ok(PortAction::Back);
         }
         let boot = if let Some(plan) = BootPlan::inspect(mode) {
             match self.select(
@@ -508,7 +641,7 @@ impl Interface {
             )? {
                 Some(0) => None,
                 Some(1) => Some(plan),
-                _ => return Ok(PortAction::Edit),
+                _ => return Ok(PortAction::Back),
             }
         } else {
             None
@@ -531,7 +664,7 @@ impl Interface {
             tui!(self.language, confirm_handover)
         };
         if !self.confirm(consent, false)? {
-            return Ok(PortAction::Edit);
+            return Ok(PortAction::Back);
         }
         if let Err(error) = cutover(
             paths,
@@ -543,7 +676,7 @@ impl Interface {
         ) {
             self.line(&error.to_string())?;
             self.pause()?;
-            return Ok(PortAction::Edit);
+            return Ok(PortAction::Back);
         }
         if let StartMode::Service(scope) = mode {
             self.line(&tui!(
@@ -1119,6 +1252,15 @@ fn service_label(language: Language, scope: crate::user_service::Scope) -> &'sta
 
 fn menu_line(text: &str, width: u16) -> String {
     truncate_str(text, usize::from(width.saturating_sub(4)).max(1), "…").into_owned()
+}
+
+fn configured_endpoint(settings: &Settings, port: u16) -> String {
+    let protocol = if settings.http_port == Some(port) {
+        "HTTP"
+    } else {
+        "SOCKS5"
+    };
+    format!("{protocol} 127.0.0.1:{port}")
 }
 
 fn ports_label(http: Option<u16>, socks: Option<u16>) -> String {
