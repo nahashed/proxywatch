@@ -32,23 +32,39 @@ regular_member() {
     [[ -s $2 ]] || fail "Empty archive member: $1"
 }
 
-available_alias() {
-    [[ ! -e $alias_path && ! -L $alias_path ]] || return 1
-    ! PATH="$user_path" command -v pwch >/dev/null 2>&1 || return 1
-    local remaining="$user_path:" directory
+name_is_free() {
+    local name=$1 remaining="$user_path:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" directory path
+    # Also inspect dangling links, which command -v does not report. Treat only our
+    # own links and the installed binary as available when repairing another link.
+    case $(type -t -- "$name" || true) in function|alias|builtin|keyword) return 1 ;; esac
     while [[ -n $remaining ]]; do
         directory=${remaining%%:*}
         remaining=${remaining#*:}
-        [[ ! -e ${directory:-.}/pwch && ! -L ${directory:-.}/pwch ]] || return 1
+        path=${directory:-.}/$name
+        if [[ -e $path || -L $path ]]; then
+            [[ $path -ef $binary ]] || return 1
+        fi
     done
 }
 
-claim_alias() {
-    if available_alias; then
-        if ln -sT -- proxywatch "$alias_path"; then
-            printf 'You can also run pwch.\n'
-        elif [[ ! -e $alias_path && ! -L $alias_path ]]; then
-            fail "Could not create $alias_path"
+link_command() {
+    local target=$1 link=$2
+    [[ ! -L $link && ! -e $link ]] || return 0
+    # Never replace a concurrent installer's file or change a read-only system directory.
+    if ! ln -sT -- "$target" "$link" 2>/dev/null && [[ ! -e $link && ! -L $link ]]; then
+        printf 'Could not create %s. Run %s to open Proxywatch.\n' "$link" "$binary"
+    fi
+}
+
+install_commands() {
+    local system_bin=/usr/bin
+    if name_is_free proxywatch && trusted_path "$system_bin"; then
+        link_command "$binary" "$system_bin/proxywatch"
+    fi
+    if name_is_free pwch; then
+        link_command proxywatch "$alias_path"
+        if [[ $alias_path -ef $binary ]] && trusted_path "$system_bin"; then
+            link_command "$binary" "$system_bin/pwch"
         fi
     fi
 }
@@ -183,45 +199,49 @@ owner_systemctl() {
     "${owner_command[@]}" /usr/bin/systemctl --user "$@" 2>/dev/null
 }
 
-install_system_unit() {
-    [[ -f $work/system.service ]] || return 0
-    ensure_directory "${system_unit%/*}"
-    ensure_directory "${unit_receipt%/*}"
-    if [[ -e $unit_receipt || -L $unit_receipt ]]; then
-        if [[ ! -f $unit_receipt ]] || ! trusted_path "$unit_receipt"; then
-            printf 'Skipping the system service: its installation receipt is not a trusted file.\n'
+install_unit() {
+    local source=$1 target=$2 receipt=$3 previous=$4 current='' recorded='' digest
+    installed_unit_new=false
+    installed_unit_changed=false
+    installed_unit_managed=false
+    [[ -f $source ]] || return 0
+    ensure_directory "${target%/*}"
+    ensure_directory "${receipt%/*}"
+    if [[ -e $receipt || -L $receipt ]]; then
+        if [[ ! -f $receipt ]] || ! trusted_path "$receipt"; then
+            printf 'Skipping %s: its installation receipt is not a trusted file.\n' "$target"
             return 0
         fi
+        recorded=$(<"$receipt")
+        previous=''
     fi
-    local current='' digest recorded=''
-    digest=$(sha256sum < "$work/system.service")
+    digest=$(sha256sum < "$source")
     digest=${digest%% *}
-    if [[ -e $system_unit || -L $system_unit ]]; then
-        if [[ -f $system_unit ]] && trusted_path "$system_unit"; then
-            current=$(sha256sum < "$system_unit")
+    if [[ -e $target || -L $target ]]; then
+        if [[ -f $target ]] && trusted_path "$target"; then
+            current=$(sha256sum < "$target")
             current=${current%% *}
         fi
-        if [[ -f $unit_receipt ]]; then recorded=$(<"$unit_receipt"); fi
-        if [[ -z $current || $current != "$digest" && $current != "$recorded" ]]; then
-            printf 'Preserved the customized system service at %s. Review and restart it manually if needed.\n' "$system_unit"
+        if [[ -z $current || $current != "$digest" && $current != "$recorded" && $current != "$previous" ]]; then
+            printf 'Preserved the customized service at %s. Review and restart it manually if needed.\n' "$target"
             return 0
         fi
-    elif [[ ! -e $unit_receipt ]]; then
-        system_unit_new=true
+    elif [[ ! -e $receipt ]]; then
+        installed_unit_new=true
     fi
     if [[ $current != "$digest" ]]; then
-        system_stage=$(mktemp "${system_unit%/*}/.proxywatch-service.XXXXXXXX")
-        install -m 0644 -- "$work/system.service" "$system_stage"
-        mv -fT -- "$system_stage" "$system_unit"
-        system_unit_changed=true
-        printf 'Installed the Proxywatch system service definition.\n'
+        unit_stage=$(mktemp "${target%/*}/.proxywatch-service.XXXXXXXX")
+        install -m 0644 -- "$source" "$unit_stage"
+        mv -fT -- "$unit_stage" "$target"
+        installed_unit_changed=true
+        printf 'Installed the Proxywatch service definition at %s.\n' "$target"
     fi
     if [[ $recorded != "$digest" ]]; then
-        system_stage=$(mktemp "${unit_receipt%/*}/.system-unit.XXXXXXXX")
-        printf '%s\n' "$digest" > "$system_stage"
-        mv -fT -- "$system_stage" "$unit_receipt"
+        unit_stage=$(mktemp "${receipt%/*}/.unit-digest.XXXXXXXX")
+        printf '%s\n' "$digest" > "$unit_stage"
+        mv -fT -- "$unit_stage" "$receipt"
     fi
-    system_unit_managed=true
+    installed_unit_managed=true
 }
 
 system_control() {
@@ -235,6 +255,47 @@ distributed_system_service() {
     dropins=$(system_control show --property=DropInPaths --value proxywatch.service) || return 1
     [[ $fragment == "$system_unit" && $names == proxywatch.service && -z $dropins ]] || return 1
     cmp -s "$work/system.service" "$system_unit" && trusted_path "$system_unit"
+}
+
+distributed_user_service() {
+    local fragment dropins
+    [[ $user_unit_managed == true ]] || return 1
+    fragment=$(owner_systemctl show --property=FragmentPath --value proxywatch.service) || return 1
+    dropins=$(owner_systemctl show --property=DropInPaths --value proxywatch.service) || return 1
+    [[ $fragment == "$unit" && -z $dropins ]] && cmp -s "$work/proxywatch.service" "$unit" && trusted_path "$unit"
+}
+
+needs_recovery() {
+    local state
+    state=$("$1" show --property=ActiveState,SubState proxywatch.service) || return 1
+    case $'\n'$state$'\n' in
+        *$'\nActiveState=failed\n'*|*$'\nSubState=auto-restart\n'*|*$'\nSubState=auto-restart-queued\n'*) return 0 ;;
+    esac
+    return 1
+}
+
+open_recovery_menu() {
+    local control=$1
+    if [[ $("$control" show --property=NeedDaemonReload --value proxywatch.service) == yes ]]; then
+        "$control" daemon-reload || fail 'Could not reload the updated Proxywatch service definition'
+    fi
+    recovery=true
+}
+
+restart_packaged_service() {
+    local control=$1 check=$2 scope=$3
+    "$check" || { printf 'The active Proxywatch %s service is customized. Restart it manually if needed.\n' "$scope"; return 0; }
+    "$control" daemon-reload || fail "Could not reload the $scope service manager"
+    "$check" || fail "The $scope service changed during the update. Check it before restarting."
+    if needs_recovery "$control"; then
+        recovery=true
+    elif "$control" try-restart proxywatch.service && "$control" is-active --quiet proxywatch.service; then
+        printf 'Restarted the active Proxywatch %s service.\n' "$scope"
+    elif needs_recovery "$control"; then
+        recovery=true
+    else
+        fail "Proxywatch $scope service did not restart"
+    fi
 }
 
 apply_system_service() {
@@ -251,17 +312,13 @@ apply_system_service() {
         fi
         return 1
     fi
+    if needs_recovery system_control && distributed_system_service; then
+        open_recovery_menu system_control
+        return 0
+    fi
     if system_control is-active --quiet proxywatch.service; then
         if [[ $changed == true || $system_unit_changed == true ]]; then
-            if ! distributed_system_service; then
-                printf 'The active system service is customized. Review and restart it manually.\n'
-                return 0
-            fi
-            system_control daemon-reload || fail 'Could not reload the system service manager'
-            distributed_system_service || fail 'The system service changed during the update. Check it before restarting.'
-            system_control try-restart proxywatch.service && system_control is-active --quiet proxywatch.service ||
-                fail 'Proxywatch system service did not restart'
-            printf 'Restarted the active Proxywatch system service.\n'
+            restart_packaged_service system_control distributed_system_service system
         fi
         return 0
     fi
@@ -277,7 +334,12 @@ apply_system_service() {
 }
 
 apply_update() {
-    local fragment dropins
+    local changed=$1
+    if [[ $manager_available == true ]] && needs_recovery owner_systemctl && distributed_user_service; then
+        open_recovery_menu owner_systemctl
+        return 0
+    fi
+    [[ $changed == true || $user_unit_changed == true ]] || return 0
     if [[ $manager_available != true ]]; then
         printf 'User service manager unavailable. Restart any running foreground instance to use the updated files.\n'
         return
@@ -286,22 +348,12 @@ apply_update() {
         printf 'No active Proxywatch user service. Restart any running foreground instance to use the updated files.\n'
         return
     fi
-    fragment=$(owner_systemctl show --property=FragmentPath --value proxywatch.service) || fail 'Could not identify the active user service'
-    dropins=$(owner_systemctl show --property=DropInPaths --value proxywatch.service) || fail 'Could not identify user service overrides'
-    if [[ $fragment != "$unit" || -n $dropins ]]; then
-        printf 'The active Proxywatch user service is customized. Restart it as its owner to use the updated files.\n'
-        return
-    fi
-    owner_systemctl daemon-reload &&
-        owner_systemctl try-restart proxywatch.service &&
-        owner_systemctl is-active --quiet proxywatch.service ||
-        fail 'Proxywatch user service did not restart'
-    printf 'Restarted the active Proxywatch user service.\n'
+    restart_packaged_service owner_systemctl distributed_user_service user
 }
 
 finish_install() {
-    local changed=$1
-    claim_alias
+    local changed=$1 recovery=false
+    install_commands
     prepare_owner
     # Newly installed fragments may have been cached as missing by an existing manager.
     if [[ $user_unit_changed == true && $manager_available == true ]] && ! owner_systemctl is-active --quiet proxywatch.service; then
@@ -311,10 +363,17 @@ finish_install() {
         -d /run/systemd/system && -x /usr/bin/systemctl ]] && ! system_control is-active --quiet proxywatch.service; then
         system_control daemon-reload || printf 'Could not reload the system service manager.\n'
     fi
-    if ! apply_system_service "$changed" && [[ $changed == true ]]; then apply_update; fi
+    if ! apply_system_service "$changed"; then apply_update "$changed"; fi
     flock -u "$install_lock"
     exec {install_lock}<&-
-    if "${owner_command[@]}" /bin/sh -c 'test -f "${XDG_CONFIG_HOME-$HOME/.config}/proxywatch/settings.json"'; then return; fi
+    if "${owner_command[@]}" /bin/sh -c 'test -f "${XDG_CONFIG_HOME-$HOME/.config}/proxywatch/settings.json"'; then
+        [[ $recovery == true ]] || return 0
+        printf 'Proxywatch service failed to start. Run %s tui to review its settings and local ports.\n' "$binary"
+        [[ $interactive == true ]] || return 0
+        cleanup
+        trap - EXIT HUP INT TERM
+        exec "${owner_command[@]}" "$binary" tui
+    fi
     if [[ $interactive != true ]]; then
         printf 'Setup is pending. Run proxywatch as the service owner to configure it.\n'
         return
@@ -364,24 +423,16 @@ alias_path=/usr/local/bin/pwch
 unit=/usr/local/lib/systemd/user/proxywatch.service
 system_unit=/usr/local/lib/systemd/system/proxywatch.service
 unit_receipt=/usr/local/lib/proxywatch/system-unit.sha256
-system_unit_new=false
-system_unit_changed=false
-system_unit_managed=false
-user_unit_changed=false
-for target in "$binary" "$unit"; do
-    [[ ! -L $target && ( ! -e $target || -f $target ) ]] || fail "Refusing to replace $target"
-done
+[[ ! -L $binary && ( ! -e $binary || -f $binary ) ]] || fail "Refusing to replace $binary"
 
 umask 022
 work=$(mktemp -d /tmp/proxywatch-install.XXXXXXXX)
 binary_stage=''
 unit_stage=''
-system_stage=''
 xray_stage=''
 cleanup() {
     if [[ -n $binary_stage ]]; then rm -f -- "$binary_stage"; fi
     if [[ -n $unit_stage ]]; then rm -f -- "$unit_stage"; fi
-    if [[ -n $system_stage ]]; then rm -f -- "$system_stage"; fi
     if [[ -n $xray_stage ]]; then rm -f -- "$xray_stage"; fi
     rm -f -- "$work/xray.zip" "$work/xray" "$work/SHA256SUMS" "$work/archive" "$work/proxywatch" "$work/proxywatch.service" "$work/system.service"
     rmdir -- "$work"
@@ -433,11 +484,17 @@ verify_elf "$work/proxywatch"
 exec {install_lock}</usr/local
 flock -x "$install_lock"
 ensure_directory "${binary%/*}"
-ensure_directory "${unit%/*}"
 prepare_xray
-install_system_unit
-if [[ -x $binary && -s $unit ]] && trusted_path "$binary" && cmp --silent -- "$work/proxywatch" "$binary" &&
-    cmp --silent -- "$work/proxywatch.service" "$unit"; then
+# Releases through 0.1.2 predate the user-unit receipt and share this exact fragment.
+install_unit "$work/proxywatch.service" "$unit" /usr/local/lib/proxywatch/user-unit.sha256 \
+    3f3b0dc7552a938dad3e9a83e4b261f9146f2409f074ee3eaf8f4bd694567745
+user_unit_changed=$installed_unit_changed
+user_unit_managed=$installed_unit_managed
+install_unit "$work/system.service" "$system_unit" "$unit_receipt" ''
+system_unit_new=$installed_unit_new
+system_unit_changed=$installed_unit_changed
+system_unit_managed=$installed_unit_managed
+if [[ -x $binary ]] && trusted_path "$binary" && cmp --silent -- "$work/proxywatch" "$binary"; then
     printf 'Proxywatch %s is already installed.\n' "$tag"
     finish_install "$xray_changed"
     exit 0
@@ -447,12 +504,6 @@ updating=false
 if [[ -f $binary ]]; then updating=true; fi
 binary_stage=$(mktemp "${binary%/*}/.proxywatch.XXXXXXXX")
 install -m 0755 -- "$work/proxywatch" "$binary_stage"
-if ! cmp --silent -- "$work/proxywatch.service" "$unit" 2>/dev/null; then
-    unit_stage=$(mktemp "${unit%/*}/.proxywatch-service.XXXXXXXX")
-    install -m 0644 -- "$work/proxywatch.service" "$unit_stage"
-    mv -fT -- "$unit_stage" "$unit"
-    user_unit_changed=true
-fi
 mv -fT -- "$binary_stage" "$binary"
 
 if [[ $updating == true ]]; then

@@ -51,6 +51,23 @@ output=$(setup)
 rm "$private_xray"
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 [[ $(pwch --version) == "$(proxywatch --version)" ]]
+minimal_path=/sbin:/bin:/usr/sbin:/usr/bin
+PATH="$minimal_path" bash --noprofile --norc -ec '
+    for name in proxywatch pwch; do
+        [[ $(readlink -f "$(command -v "$name")") == /usr/local/bin/proxywatch ]]
+        [[ $("$name" --version) == "proxywatch ${1#v}" ]]
+    done
+' bash "$tag"
+rm /usr/bin/proxywatch
+ln -s /missing-proxywatch /usr/bin/proxywatch
+setup
+[[ $(readlink /usr/bin/proxywatch) == /missing-proxywatch ]]
+rm /usr/bin/proxywatch
+PATH="$minimal_path" bash --noprofile --norc -ec '
+    ! command -v proxywatch
+    bash /release/install.sh --from /release --version "$1"
+    [[ $(proxywatch --version) == "proxywatch ${1#v}" ]]
+' bash "$tag"
 test -s "$unit"
 if tar -tzf "/release/$archive" "${archive%.tar.gz}/deploy/system/proxywatch.service" >/dev/null 2>&1; then
     tar -xOzf "/release/$archive" "${archive%.tar.gz}/deploy/system/proxywatch.service" | cmp - "$system_unit"
@@ -74,7 +91,7 @@ mkdir -p "/tmp/previous/$older/deploy"
 cp /bin/sleep "/tmp/previous/$older/proxywatch"
 cp "$unit" "/tmp/previous/$older/deploy/proxywatch.service"
 (cd /tmp/previous && tar -czf "$older.tar.gz" "$older" && sha256sum "$older.tar.gz" > SHA256SUMS)
-rm -- /usr/local/bin/pwch
+rm -- /usr/local/bin/pwch /usr/bin/pwch
 ln -s /missing-application /usr/bin/pwch
 bash /release/install.sh --from /tmp/previous --version v0.0.0
 [[ $(readlink /usr/bin/pwch) == /missing-application ]]
@@ -93,11 +110,12 @@ if bash /release/install.sh --from /tmp/invalid --version "$tag"; then exit 1; f
 
 rm -- /usr/bin/pwch
 install -m 755 /bin/true /usr/local/bin/pwch
-output=$(setup 2>&1)
+output=$(PATH="$minimal_path" setup 2>&1)
 [[ $output == *'User service manager unavailable'* && $output == *'Restart any running foreground instance'* ]]
 [[ $output != *'Failed to connect'* && $output != *'systemctl --user'* ]]
 [[ $(proxywatch --version) == "proxywatch ${tag#v}" ]]
 cmp /bin/true /usr/local/bin/pwch
+[[ ! -e /usr/bin/pwch && ! -L /usr/bin/pwch ]]
 before=$(stat -c '%i %y' "$binary" "$unit")
 [[ $(setup) == *'already installed'* ]]
 cmp /bin/true /usr/local/bin/pwch
@@ -202,6 +220,8 @@ case "$1" in
             --property=FragmentPath) cat /tmp/system-fragment ;;
             --property=Names) echo proxywatch.service ;;
             --property=DropInPaths) if test -e /tmp/system-override; then echo example.conf; fi ;;
+            --property=ActiveState,SubState) if test -e /tmp/system-retrying; then printf 'ActiveState=activating\nSubState=auto-restart\n'; fi ;;
+            --property=NeedDaemonReload) echo no ;;
             *) exit 2 ;;
         esac ;;
     daemon-reload|try-restart) echo "$*" >> /tmp/system-actions ;;
@@ -231,6 +251,14 @@ changed_system
 : > /tmp/system-actions
 changed_system
 [[ ! -s /tmp/system-actions ]]
+touch /tmp/system-retrying
+install /bin/true "$binary"
+output=$(changed_system)
+[[ $output == *'service failed to start'* && ! -s /tmp/system-actions ]]
+printf '%s\n' 'echo recovery-menu-open' > tui
+output=$(script -qec 'bash /release/install.sh --from /tmp/system-release --version v9.8.7' /dev/null </dev/null)
+[[ $output == *'recovery-menu-open'* && ! -s /tmp/system-actions ]]
+rm /tmp/system-retrying
 for custom in fragment override; do
     if [[ $custom == fragment ]]; then echo /etc/systemd/system/proxywatch.service > /tmp/system-fragment
     else echo "$system_unit" > /tmp/system-fragment; touch /tmp/system-override; fi
@@ -243,7 +271,7 @@ echo '# administrator edit' >> "$system_unit"
 customized=$(sha256sum "$system_unit")
 install /bin/true "$binary"
 output=$(changed_system)
-[[ $output == *'Preserved the customized system service'* && $(sha256sum "$system_unit") == "$customized" && ! -s /tmp/system-actions ]]
+[[ $output == *'Preserved the customized service'* && $(sha256sum "$system_unit") == "$customized" && ! -s /tmp/system-actions ]]
 cp "$next/deploy/system/proxywatch.service" "$system_unit"
 install /bin/true "$binary"
 SUDO_UID=65534 changed_system
@@ -262,7 +290,11 @@ cmp "$next/deploy/system/proxywatch.service" "$system_unit"
 mv "$system_unit" /tmp/administrator-service
 ln -s /tmp/administrator-service "$system_unit"
 output=$(changed_system)
-[[ $output == *'Preserved the customized system service'* && $(readlink "$system_unit") == /tmp/administrator-service && ! -s /tmp/system-actions ]]
+[[ $output == *'Preserved the customized service'* && $(readlink "$system_unit") == /tmp/administrator-service && ! -s /tmp/system-actions ]]
+echo '# local user service' >> "$unit"
+customized=$(sha256sum "$unit")
+output=$(changed_system)
+[[ $output == *'Preserved the customized service'* && $(sha256sum "$unit") == "$customized" ]]
 printf 'PASS: %s %s\n' "$(uname -m)" "$tag"
 LINUX
 done
