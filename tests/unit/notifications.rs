@@ -286,3 +286,74 @@ fn delayed_outage_and_recovery_both_reach_telegram_when_the_proxy_returns() {
         [expected["delayed"].as_str(), expected["recovery"].as_str()]
     );
 }
+
+#[test]
+fn periodic_summary_uses_telegram_through_a_live_route_and_direct_smtp_during_outage() -> Result<()>
+{
+    let settings = Settings {
+        telegram: Some(Telegram {
+            token: "fixture".into(),
+            chat_id: "room".into(),
+        }),
+        smtp: Some(Smtp {
+            host: "example.invalid".into(),
+            port: 465,
+            username: String::new(),
+            password: String::new(),
+            from: "from@example.invalid".into(),
+            to: "to@example.invalid".into(),
+        }),
+        ..Default::default()
+    };
+    let event = Event {
+        kind: "snapshot".into(),
+        total: 4,
+        ..Default::default()
+    };
+    let send_mail = |_: &Smtp, alert: &Alert, _: Duration| {
+        assert_eq!(alert.summary, alerts(settings.language).snapshot);
+        assert!(alert.text().contains(alerts(settings.language).stopped));
+        Ok(())
+    };
+    deliver_with(
+        &settings,
+        &event,
+        None,
+        |_, _, _, _| panic!("direct Telegram"),
+        send_mail,
+    )?;
+    let client = Client::builder().no_proxy().build()?;
+    let healthy = Event {
+        active: Some("Node".into()),
+        available: 1,
+        ..event
+    };
+    deliver_with(
+        &settings,
+        &healthy,
+        Some(&client),
+        |_, actual, _, _| {
+            assert!(std::ptr::eq(actual, &client));
+            Ok(())
+        },
+        |_, _, _| panic!("duplicate email"),
+    )?;
+    for language in [Language::En, Language::Ru] {
+        let settings = Settings {
+            language,
+            ..settings.clone()
+        };
+        let degraded = Event {
+            active_probe: Some(false),
+            ..healthy.clone()
+        };
+        let text = Alert::from_event(&settings, &degraded, false)?.text();
+        assert!(text.contains(alerts(language).route_probe_failed));
+        assert!(
+            !Alert::from_event(&settings, &healthy, false)?
+                .text()
+                .contains(alerts(language).route_probe_failed)
+        );
+    }
+    Ok(())
+}

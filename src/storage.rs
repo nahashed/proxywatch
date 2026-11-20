@@ -59,6 +59,16 @@ pub struct Smtp {
     pub to: String,
 }
 
+pub const MAX_NOTIFICATION_INTERVAL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationMode {
+    #[default]
+    Summary,
+    Changes,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -77,6 +87,8 @@ pub struct Settings {
     pub timeout_seconds: u64,
     pub refresh_seconds: u64,
     pub xray_binary: String,
+    pub notification_interval_seconds: u64,
+    pub notification_mode: NotificationMode,
     pub telegram: Option<Telegram>,
     pub smtp: Option<Smtp>,
 }
@@ -103,6 +115,8 @@ impl Default for Settings {
             timeout_seconds: 8,
             refresh_seconds: 3600,
             xray_binary: crate::xray_binary::default_binary().into(),
+            notification_interval_seconds: 1800,
+            notification_mode: NotificationMode::default(),
             telegram: None,
             smtp: None,
         }
@@ -168,7 +182,9 @@ impl Settings {
                 && (1..=86400).contains(&self.reserve_interval_seconds)
                 && (1..=300).contains(&self.timeout_seconds)
                 && (1..=100).contains(&self.failure_threshold)
-                && (1..=2_592_000).contains(&self.refresh_seconds),
+                && (1..=2_592_000).contains(&self.refresh_seconds)
+                && (1..=MAX_NOTIFICATION_INTERVAL_SECONDS)
+                    .contains(&self.notification_interval_seconds),
             message!(invalid_intervals)
         );
         ensure!(
@@ -203,6 +219,8 @@ pub struct Event {
     pub from: Option<String>,
     pub to: Option<String>,
     pub active: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_probe: Option<bool>,
     pub available: usize,
     pub total: usize,
     pub started_at: u64,
@@ -237,6 +255,7 @@ pub struct State {
     pub updated_at: u64,
     pub outage: bool,
     pub pending: Vec<Event>,
+    pub notification_attempted_at: Option<u64>,
     pub skipped: Vec<crate::subscription::SkippedNode>,
 }
 

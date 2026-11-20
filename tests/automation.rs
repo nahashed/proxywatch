@@ -319,3 +319,37 @@ fn parallel_merges_retain_each_other_changes() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn notification_preferences_default_and_merge_without_touching_credentials() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path();
+    let file = path.join("settings.json");
+    let old = br#"{"subscription_url":"https://example.invalid/sub","telegram":{"token":"private-canary","chat_id":"room"}}"#;
+    fs::write(&file, old)?;
+    let args = ["configure", "--stdin", "--merge"];
+    let apply = |value: &[u8]| cli(path, &args, value);
+    assert!(apply(b"{}")?.status.success());
+    let defaults: Value = serde_json::from_slice(&fs::read(&file)?)?;
+    assert_eq!(defaults["notification_mode"], "summary");
+    assert_eq!(defaults["notification_interval_seconds"], 1800);
+    let result =
+        apply(br#"{"notification_mode":"changes","notification_interval_seconds":2592000}"#)?;
+    assert!(result.status.success() && result.stdout.is_empty() && result.stderr.is_empty());
+    let saved = fs::read(&file)?;
+    let updated: Value = serde_json::from_slice(&saved)?;
+    assert_eq!(updated["notification_mode"], "changes");
+    assert_eq!(updated["notification_interval_seconds"], 2_592_000);
+    assert_eq!(updated["telegram"], defaults["telegram"]);
+    for invalid in [
+        br#"{"notification_mode":"private-canary"}"#.as_slice(),
+        br#"{"notification_interval_seconds":0}"#,
+        br#"{"notification_interval_seconds":2592001}"#,
+    ] {
+        let error = apply(invalid)?;
+        assert!(!error.status.success() && error.stdout.is_empty());
+        assert!(!String::from_utf8(error.stderr)?.contains("private-canary"));
+        assert_eq!(fs::read(&file)?, saved);
+    }
+    Ok(())
+}

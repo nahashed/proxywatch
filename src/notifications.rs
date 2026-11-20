@@ -100,6 +100,9 @@ impl Alert {
             ));
         }
         nodes.push(Line::Field(words.route, route));
+        if event.active.is_some() && event.active_probe == Some(false) {
+            nodes.push(Line::Text(words.route_probe_failed.into()));
+        }
         let mut sections = vec![vec![Line::Heading(summary)], identity, nodes];
 
         let repeats_active = event.kind == "snapshot"

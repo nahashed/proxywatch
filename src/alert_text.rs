@@ -15,6 +15,7 @@ pub struct AlertText {
     pub more: &'static str,
     pub stopped: &'static str,
     pub route: &'static str,
+    pub route_probe_failed: &'static str,
     pub available: &'static str,
     pub of: &'static str,
     pub event: &'static str,

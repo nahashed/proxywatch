@@ -3,7 +3,7 @@ use crate::{
     engine::Engine,
     notifications,
     relay::Relay,
-    storage::{DiagnosticResource, Event, NodeHealth, Paths, State},
+    storage::{DiagnosticResource, Event, NodeHealth, NotificationMode, Paths, Settings, State},
     subscription::{self, Node, Subscription},
 };
 use anyhow::{Context, Result};
@@ -110,14 +110,26 @@ fn record(
         total: state.nodes.len(),
         ..Event::default()
     };
+    if route_event.is_some() || !changes.is_empty() {
+        let notice = if state.pending.is_empty() {
+            Event {
+                kind: route_event.unwrap_or("nodes").into(),
+                changes: changes.clone(),
+                ..base.clone()
+            }
+        } else {
+            // Changes from multiple rounds are represented by the latest inventory.
+            node_summary(state, at)
+        };
+        state.pending.clear();
+        state.pending.push(notice);
+    }
     let mut push = |kind: &str, changes| {
-        let event = Event {
+        state.history.push(Event {
             kind: kind.into(),
             changes,
             ..base.clone()
-        };
-        state.pending.push(event.clone());
-        state.history.push(event);
+        });
     };
     if let Some(kind) = route_event {
         let (related, independent) = changes.into_iter().partition(|(name, _)| {
@@ -129,8 +141,8 @@ fn record(
         push(kind, related);
         changes = independent;
     }
-    for change in changes {
-        push("nodes", vec![change]);
+    if !changes.is_empty() {
+        push("nodes", changes);
     }
 }
 
@@ -399,6 +411,88 @@ impl ProbeDeadlines {
     }
 }
 
+fn node_summary(state: &State, at: u64) -> Event {
+    let mut changes: Vec<_> = state
+        .nodes
+        .iter()
+        .filter_map(|(name, node)| node.available.map(|available| (name.clone(), available)))
+        .collect();
+    // Short messages list unavailable nodes first; nodes with the same status keep their name order.
+    changes.sort_by_key(|(_, available)| *available);
+    Event {
+        kind: "snapshot".into(),
+        at,
+        active: state.active.clone(),
+        active_probe: state.last_probe,
+        started_at: state.started_at,
+        total: state.nodes.len(),
+        available: changes.iter().filter(|(_, available)| *available).count(),
+        changes,
+        ..Event::default()
+    }
+}
+
+struct NotificationSchedule {
+    enabled: bool,
+    mode: NotificationMode,
+    interval: Duration,
+    next: Instant,
+}
+
+impl NotificationSchedule {
+    fn restore(settings: &Settings, state: &mut State, tick: Instant, timestamp: u64) -> Self {
+        let enabled = settings.telegram.is_some() || settings.smtp.is_some();
+        let seconds = settings.notification_interval_seconds;
+        if !enabled {
+            state.pending.clear();
+        } else if state.pending.len() > 1 {
+            // Older versions stored each undelivered transition separately.
+            state.pending = vec![node_summary(state, timestamp)];
+        }
+        let delay = state.notification_attempted_at.map_or(0, |last| {
+            seconds.saturating_sub(timestamp.saturating_sub(last))
+        });
+        Self {
+            enabled,
+            mode: settings.notification_mode,
+            interval: Duration::from_secs(seconds),
+            next: tick + Duration::from_secs(delay),
+        }
+    }
+
+    fn deadline(&self, state: &State) -> Option<Instant> {
+        (self.enabled && (self.mode == NotificationMode::Summary || !state.pending.is_empty()))
+            .then_some(self.next)
+    }
+
+    fn deliver_due(
+        &mut self,
+        paths: &Paths,
+        state: &mut State,
+        tick: Instant,
+        timestamp: u64,
+        send: impl FnOnce(&Event) -> Result<()>,
+    ) -> Result<()> {
+        if self.deadline(state).is_none_or(|deadline| tick < deadline) {
+            return Ok(());
+        }
+        if self.mode == NotificationMode::Summary || state.pending[0].kind == "snapshot" {
+            state.pending = vec![node_summary(state, timestamp)];
+        }
+        // Checkpoint the attempt *before* delivery. Restarting cannot immediately replay the queue.
+        state.notification_attempted_at = Some(timestamp);
+        paths.save_state(state)?;
+        self.next = tick + self.interval;
+        if send(&state.pending[0]).is_ok() {
+            state.pending.clear();
+            paths.save_state(state)?;
+        } else {
+            eprintln!("{}", message!(delivery_retry));
+        }
+        Ok(())
+    }
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     let _lock = paths.lock()?;
     let mut settings = paths.load_settings()?;
@@ -437,6 +531,8 @@ pub fn run(paths: &Paths) -> Result<()> {
         started,
         timestamp,
     );
+    let mut notifications =
+        NotificationSchedule::restore(&settings, &mut state, started, timestamp);
     state.status = "starting".into();
     state.started_at = timestamp;
     state.updated_at = timestamp;
@@ -446,7 +542,6 @@ pub fn run(paths: &Paths) -> Result<()> {
         reserves: started,
     };
     let mut refresh = Instant::now();
-    let mut notify = Instant::now();
     let mut active: Option<Current<Engine>> = None;
     let mut previously_failed_refresh = false;
     while !stop.load(Ordering::Relaxed) {
@@ -480,7 +575,6 @@ pub fn run(paths: &Paths) -> Result<()> {
         if tick >= probes.next_round() {
             let nodes = data.as_ref().map_or(&[][..], |d| d.nodes.as_slice());
             state.skipped = data.as_ref().map_or_else(Vec::new, |d| d.skipped.clone());
-            let old_pending = state.pending.len();
             let full = Round {
                 nodes,
                 scan_reserves: tick >= probes.reserves,
@@ -507,8 +601,8 @@ pub fn run(paths: &Paths) -> Result<()> {
                 probes.reserves =
                     Instant::now() + Duration::from_secs(settings.reserve_interval_seconds);
             }
-            if state.pending.len() != old_pending {
-                notify = Instant::now();
+            if !notifications.enabled {
+                state.pending.clear();
             }
             state.updated_at = now()?;
             diagnostics.select_route(
@@ -519,23 +613,14 @@ pub fn run(paths: &Paths) -> Result<()> {
             probes.active = Instant::now() + Duration::from_secs(settings.interval_seconds);
             paths.save_state(&mut state)?;
         }
-        if Instant::now() >= notify {
-            let mut index = 0;
-            while index < state.pending.len() && !stop.load(Ordering::Relaxed) {
-                let event = &state.pending[index];
-                let proxy = active
-                    .as_ref()
-                    .filter(|_| state.last_probe == Some(true))
-                    .map(|a| &a.engine.client);
-                if notifications::deliver(&settings, event, proxy).is_err() {
-                    eprintln!("{}", message!(delivery_retry));
-                    notify = Instant::now() + Duration::from_secs(300);
-                    index += 1;
-                    continue;
-                }
-                state.pending.remove(index);
-                paths.save_state(&mut state)?;
-            }
+        if !stop.load(Ordering::Relaxed) {
+            let proxy = active
+                .as_ref()
+                .filter(|_| state.last_probe == Some(true))
+                .map(|current| &current.engine.client);
+            notifications.deliver_due(paths, &mut state, Instant::now(), now()?, |event| {
+                notifications::deliver(&settings, event, proxy)
+            })?;
         }
         // Return to the primary deadlines between diagnostic requests, even if several are overdue.
         if !stop.load(Ordering::Relaxed)
@@ -551,8 +636,8 @@ pub fn run(paths: &Paths) -> Result<()> {
             if let Some(diagnostic) = diagnostics.next() {
                 next = next.min(diagnostic);
             }
-            if !state.pending.is_empty() {
-                next = next.min(notify);
+            if let Some(deadline) = notifications.deadline(&state) {
+                next = next.min(deadline);
             }
             match sleep.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -721,7 +806,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["snapshot", "nodes", "nodes", "outage", "recovery"]
         );
-        assert_eq!(scenario.state.history.len(), scenario.state.pending.len());
+        assert_eq!(scenario.state.pending.len(), 1);
+        assert_eq!(scenario.state.pending[0].kind, "snapshot");
         assert_eq!(scenario.state.preferred.as_deref(), Some("A"));
     }
 
@@ -753,3 +839,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests/unit/diagnostic_schedule.rs"]
 mod diagnostic_schedule_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/notification_schedule.rs"]
+mod notification_schedule_tests;

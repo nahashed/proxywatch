@@ -12,6 +12,7 @@ AlertText {
     unnamed: "unnamed node",
     more: "Additional nodes",
     stopped: "stopped",
+    route_probe_failed: "The most recent check through the active route failed.",
     route: "Active route",
     available: "Available nodes",
     of: "of",
