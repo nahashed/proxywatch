@@ -317,11 +317,17 @@ impl<'a> UserService<'a> {
         let Some(state) = self.state() else {
             return Applied::Failed;
         };
+        let recovering = (state.failed || state.retrying) && (state.enabled || first_setup);
+        if recovering && (!self.installation.daemon_lock_available() || !self.prepare_handover()) {
+            return Applied::Failed;
+        }
         let (args, success) = if first_setup {
             if !state.active && !self.installation.daemon_lock_available() {
                 return Applied::Failed;
             }
             (&["enable", "--now", UNIT][..], Applied::Started)
+        } else if recovering {
+            (&["start", UNIT][..], Applied::Started)
         } else if state.active {
             (&["try-restart", UNIT][..], Applied::Restarted)
         } else {

@@ -40,7 +40,7 @@ case "$1" in
         printf 'LoadState=loaded\nFragmentPath=%s/%s.service\n' "$base" "$scope"
         cat "$base/$scope.state"
         ;;
-    start|stop|enable|try-restart|is-active) exit 0 ;;
+    start|stop|enable|try-restart|is-active|reset-failed) exit 0 ;;
     *) exit 1 ;;
 esac
 "#,
@@ -181,5 +181,22 @@ fn trusts_a_private_runtime_directory_and_its_owners_unix_socket() -> std::io::R
     assert!(!has_owner_socket(tmp.path(), uid.wrapping_add(1)));
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755))?;
     assert!(!has_owner_socket(tmp.path(), uid));
+    Ok(())
+}
+
+#[test]
+fn saving_can_recover_an_enabled_unit_after_it_hits_the_start_limit() -> std::io::Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.state("system", "failed", "enabled", "")?;
+    let service = fixture.discover(true).unwrap();
+    assert!(matches!(service.apply(false), Applied::Started));
+    let calls = fs::read_to_string(fixture.tmp.path().join("calls"))?;
+    assert!(
+        calls
+            .find("system reset-failed proxywatch.service")
+            .unwrap()
+            < calls.find("system start proxywatch.service").unwrap()
+    );
+    assert!(!calls.contains("system enable --now"));
     Ok(())
 }
