@@ -104,6 +104,8 @@ macro_rules! text {
     (lock_unavailable) => { "A service is already running in this directory or the lock file is unavailable" };
     (install_signal_handler) => { "Could not install the shutdown handler" };
     (subscription_retry) => { "Could not refresh the subscription. A retry is scheduled." };
+    (handover_boot_restore) => { "Could not restore the original boot settings. Check systemctl is-enabled for proxywatch.service and xray.service." };
+    (handover_boot_failed) => { "The change to boot settings failed. The original Xray service was restored." };
     (handover_changed) => { "The port owner, connections or settings changed. Check the ports again." };
     (handover_probe) => { "No subscription node passed the service check through a temporary proxy." };
     (handover_start) => { "Proxywatch could not take the selected ports or pass the service check." };

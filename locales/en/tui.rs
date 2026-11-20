@@ -67,6 +67,11 @@ macro_rules! tui_en {
     (test_handover) => { "Test the subscription for handover" };
     (checking_handover) => { "Downloading the subscription and checking the configured URL through a node on a temporary local port. xray.service is still running." };
     (route_verified) => { "The health check passed. Proxywatch will use the addresses below." };
+    (confirm_permanent) => { "Transfer these ports to Proxywatch permanently and change both boot settings?" };
+    (handover_boot_notice) => { "After traffic passes through the new proxy, enable proxywatch.service at boot and disable startup of xray.service." };
+    (handover_permanent) => { "Permanently, start Proxywatch at boot" };
+    (handover_temporary) => { "Temporarily, keep both boot settings" };
+    (handover_duration) => { "How long should Proxywatch own these ports?" };
     (handover_service) => { "Proxywatch will run as the {} service proxywatch.service. Both services will keep their current boot settings." };
     (handover_foreground) => { "Proxywatch will run in this terminal. Ctrl+C ends the session and restores xray.service. Keep the terminal open while using Proxywatch." };
     (rollback_notice) => { "Switching processes briefly interrupts the endpoint. A connection arriving during the switch may drop. If verification fails, Proxywatch will try to restore xray.service." };

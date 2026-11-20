@@ -30,6 +30,7 @@ HTTP_PORT, SOCKS_PORT = 10808, 10809  # Deliberately reversed from the Proxywatc
 SETTINGS = Path("/root/.config/proxywatch")
 CONFIG = Path("/usr/local/etc/xray/config.json")
 UNIT = Path("/etc/systemd/system/xray.service")
+BOOT = Path("/var/lib/proxywatch-handoff-test")
 TARGET = f"http://127.0.0.1:{DIRECT}/health"
 
 
@@ -105,8 +106,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
 
 def start_fixtures(stack):
-    cert_prefix = "/tmp/handoff-cert"
-    run(XRAY, "tls", "cert", "-domain=localhost", "-file=" + cert_prefix)
+    BOOT.mkdir(exist_ok=True)
+    cert_prefix = str(BOOT / "cert")
+    if not Path(cert_prefix + ".crt").exists():
+        run(XRAY, "tls", "cert", "-domain=localhost", "-file=" + cert_prefix)
     cert = Path(cert_prefix + ".crt")
     pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
     for port in [DIRECT, UPSTREAM]:
@@ -129,11 +132,11 @@ def start_fixtures(stack):
     return config
 
 
-def start_legacy(extra=False, foreign=False, restart_condition=None):
+def start_legacy(extra=False, foreign=False, restart_condition=None, http_only=False):
     def inbound(protocol, port):
         options = {"auth": "noauth", "udp": False} if protocol == "socks" else {}
         return {"listen": "127.0.0.1", "port": port, "protocol": protocol, "settings": options}
-    inputs = [inbound("socks", SOCKS_PORT)]
+    inputs = [] if http_only else [inbound("socks", SOCKS_PORT)]
     if not foreign:
         inputs.append(inbound("http", HTTP_PORT))
     if extra:
@@ -150,7 +153,12 @@ def start_legacy(extra=False, foreign=False, restart_condition=None):
     assert os.path.samefile(process / "exe", XRAY)
     assert process.stat().st_uid == pwd.getpwnam("nobody").pw_uid
     assert list((process / "fd").iterdir())
-    if not foreign:
+    if http_only:
+        wait_for("legacy HTTP", lambda: through("http", HTTP_PORT) == b"direct")
+        with socket.socket() as free:
+            free.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            free.bind(("127.0.0.1", SOCKS_PORT))
+    elif not foreign:
         verify_traffic(b"direct")
     else:
         wait_for("legacy SOCKS", lambda: through("socks", SOCKS_PORT) == b"direct")
@@ -367,6 +375,8 @@ def scenario(name, upstream_config):
                 verify_traffic(b"direct")
             else:
                 wizard.choose(takeover, "jjj\r")
+                if name == "system-handover":
+                    wizard.choose("How long should Proxywatch own these ports?")
                 wizard.wait("Temporarily stop xray.service")
                 assert property_of("xray.service", "InvocationID") == original
                 assert Fixture.requests[DIRECT, "/sub"] and Fixture.requests[UPSTREAM, "/health"]
@@ -443,6 +453,105 @@ def scenario(name, upstream_config):
         print(f"PASS handover: {name}", flush=True)
 
 
+def permanent(name, config):
+    reset()
+    run("systemctl", "stop", "user@0.service")
+    run("install", "-Dm644", "/fixture/proxywatch-system.service",
+        "/usr/local/lib/systemd/system/proxywatch.service")
+    run("systemctl", "daemon-reload")
+    start_legacy(http_only=name == "system-permanent")
+    old_files = (CONFIG.read_bytes(), UNIT.read_bytes())
+    SETTINGS.mkdir(parents=True, mode=0o700)
+    saved = json.dumps({"language": "en", "instance_name": "Saved installation",
+        "subscription_url": f"http://127.0.0.1:{DIRECT}/sub", "check_url": TARGET,
+        "diagnostic_urls": [], "xray_binary": XRAY, "interval_seconds": 2})
+    (SETTINGS / "settings.json").write_text(saved)
+    boot_rollback = name == "system-permanent-rollback"
+    if boot_rollback:
+        # This unloaded target has an additional administrator-created enablement link.
+        # The post-reload state must reject the change and restore both original flags.
+        other = Path("/etc/systemd/system/handoff-unused.target.wants/xray.service")
+        other.parent.mkdir(exist_ok=True)
+        other.symlink_to(UNIT)
+    else:
+        if name == "system-permanent-failed":
+            run("systemctl", "enable", "--now", "proxywatch.service")
+            wait_for("systemd stops scheduling restarts", lambda:
+                     property_of("proxywatch.service", "ActiveState") == "failed"
+                     and int(property_of("proxywatch.service", "NRestarts")) >= 3, 30)
+            # Debian 12 retains 'exit-code' in Result, including after hitting the limit.
+            blocked = subprocess.run(["systemctl", "start", "proxywatch.service"],
+                                     capture_output=True, timeout=5)
+            assert blocked.returncode != 0
+        else:
+            run("systemctl", "start", "proxywatch.service")
+            wait_for("automatic restart after a failed bind", lambda:
+                     property_of("proxywatch.service", "SubState") == "auto-restart")
+            assert enabled("proxywatch.service") == "disabled"
+    upstream = subprocess.Popen([XRAY, "run", "-config", str(config)])
+    try:
+        with Wizard() as wizard:
+            wizard.choose("Hand over Xray ports", "jjjj\r")
+            wizard.choose("How long should Proxywatch own these ports?", "j\r")
+            wizard.wait("Transfer these ports to Proxywatch permanently")
+            assert enabled("xray.service") == "enabled" and active("xray.service")
+            wizard.send("k\r")
+            if boot_rollback:
+                wizard.wait("The change to boot settings failed.", 75)
+                assert enabled("proxywatch.service") == "disabled"
+                assert enabled("xray.service") == "enabled" and active("xray.service")
+                assert (SETTINGS / "settings.json").read_text() == saved
+                assert other.readlink() == UNIT
+                verify_traffic(b"direct")
+            else:
+                wizard.wait("The Proxywatch system service is running", 75)
+                assert enabled("proxywatch.service") == "enabled" and active("proxywatch.service")
+                assert enabled("xray.service") == "disabled" and not active("xray.service")
+                verify_traffic(b"upstream")
+        assert (CONFIG.read_bytes(), UNIT.read_bytes()) == old_files
+    finally:
+        upstream.terminate()
+        upstream.wait(timeout=5)
+    if boot_rollback:
+        other.unlink()
+    if name != "system-permanent":
+        run("systemctl", "disable", "--now", "proxywatch.service")
+        Path("/usr/local/lib/systemd/system/proxywatch.service").unlink()
+        run("systemctl", "daemon-reload")
+        run("systemctl", "start", "user@0.service")
+    else:
+        # Start the synthetic subscription and upstream before the next boot's monitor.
+        fixture = Path("/etc/systemd/system/handoff-fixture.service")
+        fixture.write_text("[Unit]\nBefore=proxywatch.service\n[Service]\nType=notify\nNotifyAccess=all\n"
+            "Environment=PROXYWATCH_HANDOFF_TEST=1\nExecStart=/usr/bin/python3 /fixture/test/migration.py serve-boot\n"
+            "[Install]\nWantedBy=multi-user.target\n")
+        run("systemctl", "daemon-reload")
+        run("systemctl", "enable", fixture.name)
+        (BOOT / "previous-invocation").write_text(property_of("proxywatch.service", "InvocationID"))
+    print(f"PASS handover: {name}", flush=True)
+
+
+def serve_boot():
+    with contextlib.ExitStack() as stack:
+        config = start_fixtures(stack)
+        with subprocess.Popen([XRAY, "run", "-config", str(config)]) as upstream:
+            wait_for("boot fixture ready", lambda: any(
+                f":{HYSTERIA:04X}" in Path("/proc/net", table).read_text()
+                for table in ("udp", "udp6")))
+            run("systemd-notify", "--ready")
+            sys.exit(upstream.wait())
+
+
+def verify_boot():
+    assert property_of("proxywatch.service", "InvocationID") not in (
+        "", (BOOT / "previous-invocation").read_text())
+    assert enabled("proxywatch.service") == "enabled" and active("proxywatch.service")
+    assert enabled("xray.service") == "disabled" and not active("xray.service")
+    assert not active("user@0.service")
+    verify_traffic(b"upstream")
+    print("PASS permanent handover after systemd shutdown and boot: HTTP and SOCKS5", flush=True)
+
+
 def main():
     # Service creation and cleanup must be confined to this test's disposable container.
     if (not __debug__ or os.environ.get("PROXYWATCH_HANDOFF_TEST") != "1"
@@ -453,14 +562,23 @@ def main():
                   if int(Path(f"/sys/class/net/{name}/flags").read_text(), 16) & 1}
     if interfaces != {"lo"}:
         raise SystemExit("The test requires a loopback-only network")
+    if sys.argv[1:] == ["serve-boot"]:
+        return serve_boot()
+    if sys.argv[1:] == ["verify-boot"]:
+        return verify_boot()
     with contextlib.ExitStack() as stack:
         config = start_fixtures(stack)
         scenarios = ("busy", "foreign", "extra", "probe-failure", "late-client", "success", "rollback", "restore-failed", "foreground",
-                     "manager-change", "system-handover", "system-first-save", "system-saved")
-        for name in sys.argv[1:] or scenarios:
+                     "manager-change", "system-handover", "system-first-save", "system-saved",
+                     "system-permanent-rollback", "system-permanent-failed", "system-permanent")
+        selected = sys.argv[1:] or scenarios
+        for name in sorted(selected, key=lambda item: item == "system-permanent"):
             if name not in scenarios:
                 raise ValueError(f"Unknown scenario: {name}")
-            scenario(name, config)
+            if name.startswith("system-permanent"):
+                permanent(name, config)
+            else:
+                scenario(name, config)
 
 
 if __name__ == "__main__":

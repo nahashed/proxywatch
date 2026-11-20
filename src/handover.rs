@@ -17,8 +17,8 @@ use std::{
     io::{self, Write},
     net::{Ipv4Addr, TcpListener},
     os::unix::{fs::MetadataExt, process::CommandExt},
-    path::Path,
-    process::{Child, Command, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, Output, Stdio},
     sync::{
         OnceLock,
         atomic::{AtomicU8, Ordering},
@@ -129,22 +129,163 @@ pub fn verify_route(settings: &Settings) -> Result<()> {
     Err(anyhow!(message!(handover_probe)))
 }
 
-fn system_xray(action: &str) -> bool {
-    Command::new("/usr/bin/systemctl")
-        .args([
-            "--system",
-            "--no-ask-password",
-            "--no-pager",
-            action,
-            "xray.service",
-        ])
+fn systemctl(args: &[&str]) -> Option<Output> {
+    let result = Command::new("/usr/bin/systemctl")
+        .args(["--system", "--no-ask-password", "--no-pager"])
+        .args(args)
         .env_remove("DBUS_SYSTEM_BUS_ADDRESS")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .ok()?;
+    result.status.success().then_some(result)
+}
+
+fn system_xray(action: &str) -> bool {
+    systemctl(&[action, "xray.service"]).is_some()
+}
+
+// Only change the standard multi-user target link. Generic `systemctl disable` can
+// remove unrelated administrator-created links and propagate to units named in Also=.
+#[derive(PartialEq, Eq)]
+struct BootLink {
+    path: PathBuf,
+    fragment: PathBuf,
+    previous: Option<PathBuf>,
+}
+
+impl BootLink {
+    fn read(unit: &str) -> Option<Self> {
+        let result = systemctl(&[
+            "show",
+            "--all",
+            "--property=Id,Names,LoadState,NeedDaemonReload,FragmentPath,UnitFileState,WantedBy,RequiredBy,UpheldBy",
+            unit,
+        ])?;
+        let properties = std::str::from_utf8(&result.stdout).ok()?;
+        let property = |key| properties.lines().find_map(|line| line.strip_prefix(key));
+        if property("Id=")? != unit
+            || property("Names=")? != unit
+            || property("LoadState=")? != "loaded"
+            || property("NeedDaemonReload=")? != "no"
+            || !property("RequiredBy=")?.is_empty()
+            || !property("UpheldBy=")?.is_empty()
+        {
+            return None;
+        }
+        let wants = Path::new("/etc/systemd/system/multi-user.target.wants");
+        if !fs::symlink_metadata(wants).ok()?.is_dir() {
+            return None;
+        }
+        let path = wants.join(unit);
+        let fragment = PathBuf::from(property("FragmentPath=")?);
+        if !fragment.is_absolute() || !fragment.is_file() {
+            return None;
+        }
+        let previous = match fs::read_link(&path) {
+            Ok(target)
+                if path.canonicalize().ok()? == fragment.canonicalize().ok()?
+                    && property("UnitFileState=")? == "enabled"
+                    && property("WantedBy=")? == "multi-user.target" =>
+            {
+                Some(target)
+            }
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    && property("UnitFileState=")? == "disabled"
+                    && property("WantedBy=")?.is_empty() =>
+            {
+                None
+            }
+            _ => return None,
+        };
+        Some(Self {
+            path,
+            fragment,
+            previous,
+        })
+    }
+
+    fn matches(&self, expected: Option<&Path>) -> bool {
+        match fs::read_link(&self.path) {
+            Ok(target) => Some(target.as_path()) == expected,
+            Err(e) => e.kind() == io::ErrorKind::NotFound && expected.is_none(),
+        }
+    }
+
+    fn change(&self, from: Option<&Path>, to: Option<&Path>) -> bool {
+        if !self.matches(from) {
+            return false;
+        }
+        if from == to {
+            return true;
+        }
+        match to {
+            Some(target) => std::os::unix::fs::symlink(target, &self.path).is_ok(),
+            None => fs::remove_file(&self.path).is_ok(),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct BootPlan {
+    proxywatch: BootLink,
+    xray: BootLink,
+}
+
+impl BootPlan {
+    pub(crate) fn inspect(mode: StartMode) -> Option<Self> {
+        if mode != StartMode::Service(Scope::System) {
+            return None;
+        }
+        Some(Self {
+            proxywatch: BootLink::read("proxywatch.service")?,
+            xray: BootLink::read("xray.service")?,
+        })
+    }
+
+    fn commit(&self, service: &UserService<'_>, interrupt: &InterruptGuard) -> Result<()> {
+        let inspect = || Self::inspect(StartMode::Service(Scope::System));
+        ensure!(
+            inspect().as_ref() == Some(self) && service.active() && !interrupt.interrupted(),
+            message!(handover_changed)
+        );
+        let proxy = &self.proxywatch;
+        let xray = &self.xray;
+        let proxy_old = proxy.previous.as_deref();
+        let xray_old = xray.previous.as_deref();
+        let proxy_new = Some(proxy_old.unwrap_or(&proxy.fragment));
+        // Remember exactly which links this transaction changed, including their original spelling.
+        ensure!(
+            proxy.change(proxy_old, proxy_new),
+            message!(handover_boot_failed)
+        );
+        let xray_changed = xray.change(xray_old, None);
+        if xray_changed
+            && systemctl(&["daemon-reload"]).is_some()
+            && inspect().is_some_and(|plan| {
+                plan.proxywatch.fragment == proxy.fragment
+                    && plan.xray.fragment == xray.fragment
+                    && plan.proxywatch.previous.as_deref() == proxy_new
+                    && plan.xray.previous.is_none()
+            })
+            && service.active()
+            && !interrupt.interrupted()
+        {
+            return Ok(());
+        }
+        let xray_restored = !xray_changed || xray.change(None, xray_old);
+        let proxy_restored = proxy.change(proxy_new, proxy_old);
+        ensure!(
+            xray_restored
+                && proxy_restored
+                && systemctl(&["daemon-reload"]).is_some()
+                && inspect().as_ref() == Some(self),
+            message!(handover_boot_restore)
+        );
+        Err(anyhow!(message!(handover_boot_failed)))
+    }
 }
 
 enum Target {
@@ -157,7 +298,7 @@ impl Target {
         match (mode, UserService::installed(paths.directory(), false)) {
             (StartMode::Foreground, None) => Ok(Self::Terminal(None)),
             (StartMode::Service(expected), Some(service))
-                if service.scope() == expected && service.stopped() =>
+                if service.scope() == expected && service.available_for_handover() =>
             {
                 Ok(Self::Service(service))
             }
@@ -276,6 +417,7 @@ pub fn cutover(
     inspected: &XrayListeners,
     mode: StartMode,
     previous: Option<&Settings>,
+    boot: Option<&BootPlan>,
 ) -> Result<()> {
     ensure!(
         available(paths, false) && !inspected.busy,
@@ -291,9 +433,23 @@ pub fn cutover(
                     == Some(inspected),
             message!(handover_changed)
         );
+        if let Some(boot) = boot {
+            ensure!(
+                BootPlan::inspect(mode).as_ref() == Some(boot),
+                message!(handover_changed)
+            );
+        }
+        if let Target::Service(service) = &target {
+            ensure!(service.prepare_handover(), message!(handover_changed));
+            ensure!(
+                xray_listeners::inspect(inspected.http, inspected.socks).as_ref()
+                    == Some(inspected),
+                message!(handover_changed)
+            );
+        }
         // Protect the rollback as well as startup from concurrent configuration writes.
         let mut new_attempted = false;
-        let attempt = (|| {
+        let attempt: Result<()> = (|| {
             ensure!(system_xray("stop"), message!(handover_stop));
             ensure!(
                 !interrupt.interrupted() && conflicts(settings).is_empty(),
@@ -301,13 +457,24 @@ pub fn cutover(
             );
             new_attempted = true;
             ensure!(target.start(), message!(handover_start));
-            wait_for_route(&mut target, settings, &interrupt)
+            wait_for_route(&mut target, settings, &interrupt)?;
+            Ok(())
         })();
-        if attempt.is_err() {
+        let boot_result = if attempt.is_ok() {
+            match (boot, &target) {
+                (Some(plan), Target::Service(service)) => plan.commit(service, &interrupt),
+                (None, _) => Ok(()),
+                _ => Err(anyhow!(message!(handover_changed))),
+            }
+        } else {
+            Ok(())
+        };
+        if attempt.is_err() || boot_result.is_err() {
             let stopped = !new_attempted || target.stop();
             let restored = restore(settings);
             ensure!(stopped, message!(handover_target_stop));
             ensure!(restored, message!(handover_restore_failed));
+            boot_result?;
             return Err(anyhow!(message!(handover_restored)));
         }
         Ok(())

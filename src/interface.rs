@@ -475,7 +475,7 @@ impl Interface {
         listeners: &crate::xray_listeners::XrayListeners,
         expected_settings: Option<&Settings>,
     ) -> Result<PortAction> {
-        use crate::handover::{StartMode, cutover, verify_route};
+        use crate::handover::{BootPlan, StartMode, cutover, verify_route};
         let mut candidate = settings.clone();
         candidate.http_port = listeners.http;
         candidate.socks_port = listeners.socks;
@@ -497,7 +497,26 @@ impl Interface {
             self.pause()?;
             return Ok(PortAction::Edit);
         }
+        let boot = if let Some(plan) = BootPlan::inspect(mode) {
+            match self.select(
+                tui!(self.language, handover_duration),
+                &[
+                    tui!(self.language, handover_temporary),
+                    tui!(self.language, handover_permanent),
+                ],
+                0,
+            )? {
+                Some(0) => None,
+                Some(1) => Some(plan),
+                _ => return Ok(PortAction::Edit),
+            }
+        } else {
+            None
+        };
         match mode {
+            StartMode::Service(_) if boot.is_some() => {
+                self.line(tui!(self.language, handover_boot_notice))?
+            }
             StartMode::Service(scope) => self.line(&tui!(
                 self.language,
                 handover_service,
@@ -506,10 +525,22 @@ impl Interface {
             StartMode::Foreground => self.line(tui!(self.language, handover_foreground))?,
         }
         self.line(tui!(self.language, rollback_notice))?;
-        if !self.confirm(tui!(self.language, confirm_handover), false)? {
+        let consent = if boot.is_some() {
+            tui!(self.language, confirm_permanent)
+        } else {
+            tui!(self.language, confirm_handover)
+        };
+        if !self.confirm(consent, false)? {
             return Ok(PortAction::Edit);
         }
-        if let Err(error) = cutover(paths, &candidate, listeners, mode, expected_settings) {
+        if let Err(error) = cutover(
+            paths,
+            &candidate,
+            listeners,
+            mode,
+            expected_settings,
+            boot.as_ref(),
+        ) {
             self.line(&error.to_string())?;
             self.pause()?;
             return Ok(PortAction::Edit);

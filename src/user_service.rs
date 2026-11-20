@@ -44,6 +44,7 @@ struct Installation<'a> {
 #[derive(Clone, Copy)]
 struct State {
     active: bool,
+    retrying: bool,
     failed: bool,
     enabled: bool,
 }
@@ -91,7 +92,7 @@ impl Installation<'_> {
         let unknown = Candidate::Foreign { claimed: true };
         let Some(info) = self.command(scope, &[
             "show", "--all",
-            "--property=LoadState,FragmentPath,DropInPaths,ActiveState,UnitFileState,NeedDaemonReload",
+            "--property=LoadState,FragmentPath,DropInPaths,ActiveState,SubState,MainPID,UnitFileState,NeedDaemonReload",
             UNIT,
         ]) else {
             return unknown;
@@ -115,6 +116,12 @@ impl Installation<'_> {
         };
         let state = State {
             active: matches!(active, "active" | "activating" | "reloading"),
+            retrying: active == "activating"
+                && property("MainPID=") == Some("0")
+                && matches!(
+                    property("SubState="),
+                    Some("auto-restart" | "auto-restart-queued")
+                ),
             failed: active == "failed",
             enabled: matches!(enabled, "enabled" | "enabled-runtime"),
         };
@@ -250,6 +257,34 @@ impl<'a> UserService<'a> {
     pub(crate) fn inactive_disabled(&self) -> bool {
         self.state()
             .is_some_and(|state| !state.active && !state.failed && !state.enabled)
+    }
+
+    pub(crate) fn available_for_handover(&self) -> bool {
+        self.state()
+            .is_some_and(|state| !state.active || state.retrying)
+    }
+
+    pub(crate) fn prepare_handover(&self) -> bool {
+        // Cancel a pending restart before Xray releases the ports. reset-failed also
+        // clears start-limit counters that may still apply after a successful stop.
+        let Some(state) = self.state() else {
+            return false;
+        };
+        if state.retrying {
+            if !self.stop() {
+                return false;
+            }
+            // A stopped, disabled unit can already have been unloaded along with its counters.
+            let _ = self.control(&["reset-failed", UNIT]);
+        } else if state.failed && self.control(&["reset-failed", UNIT]).is_none() {
+            return false;
+        }
+        self.stopped()
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.state()
+            .is_some_and(|state| state.active && !state.retrying)
     }
 
     pub(crate) fn start(&self) -> bool {

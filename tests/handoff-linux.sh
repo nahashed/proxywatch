@@ -27,10 +27,22 @@ id=$(docker create --pull=never --platform "$platform" --network none --privileg
     done
     exec /sbin/init')
 trap 'docker rm -f "$id" >/dev/null' EXIT
+wait_for_boot() {
+    # docker start returns before PID 1 has opened the system bus.
+    docker exec "$id" bash -ec '
+        for ((attempt=0; attempt<200; attempt++)); do
+            case $(systemctl is-system-running 2>/dev/null || :) in
+                running|degraded) exit 0 ;;
+            esac
+            sleep .25
+        done
+        systemctl --failed >&2
+        exit 1'
+}
 docker start "$id" >/dev/null
+wait_for_boot
 docker exec -e "XRAY_SHA256=$checksum" "$id" bash -ec '
     printf "%s  /fixture/xray.zip\n" "$XRAY_SHA256" | sha256sum -c -
-    timeout 45 systemctl is-system-running --wait || [[ $(systemctl is-system-running) == degraded ]]
     for unit in systemd-binfmt.service proc-sys-fs-binfmt_misc.automount; do
         [[ $(systemctl is-enabled "$unit") == masked ]]
     done
@@ -40,3 +52,12 @@ docker exec -e "XRAY_SHA256=$checksum" "$id" bash -ec '
     chmod 755 /usr/local/bin/xray
     systemctl start user@0.service
     exec env XDG_RUNTIME_DIR=/run/user/0 PROXYWATCH_HANDOFF_TEST=1 python3 /fixture/test/migration.py "$@"' bash "${@:4}"
+
+if docker exec "$id" test -f /var/lib/proxywatch-handoff-test/previous-invocation; then
+    # Boot the same filesystem with a fresh PID 1, empty /run and no interactive user session.
+    docker exec "$id" systemctl poweroff
+    [[ $(docker wait "$id") == 0 ]]
+    docker start "$id" >/dev/null
+    wait_for_boot
+    docker exec -e PROXYWATCH_HANDOFF_TEST=1 "$id" python3 /fixture/test/migration.py verify-boot
+fi
