@@ -313,6 +313,12 @@ apply_system_service() {
         return 1
     fi
     if needs_recovery system_control && distributed_system_service; then
+        if [[ $manager_available == true && $(system_control show --property=ActiveState --value proxywatch.service) == failed ]]; then
+            # A disabled, failed system unit no longer owns the installation. The root
+            # user manager may already be running the replacement on the same ports.
+            enabled=$(system_control is-enabled proxywatch.service) || :
+            [[ $enabled != disabled ]] || return 1
+        fi
         open_recovery_menu system_control
         return 0
     fi

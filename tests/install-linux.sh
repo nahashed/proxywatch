@@ -210,6 +210,19 @@ echo activate >> /tmp/system-actions
 ACTIVATE
 cat > /usr/bin/systemctl <<'SYSTEM'
 #!/bin/sh
+if [ "$1" = --user ]; then
+    case "$2" in
+        show-environment|is-active) exit 0 ;;
+        show) case "$3" in
+            --property=FragmentPath) echo /usr/local/lib/systemd/user/proxywatch.service ;;
+            --property=DropInPaths) exit 0 ;;
+            *) exit 2 ;;
+        esac ;;
+        daemon-reload|try-restart) echo "$*" >> /tmp/system-actions ;;
+        *) exit 2 ;;
+    esac
+    exit $?
+fi
 test "$1 $2" = '--system --no-ask-password' || exit 2
 shift 2
 case "$1" in
@@ -220,7 +233,8 @@ case "$1" in
             --property=FragmentPath) cat /tmp/system-fragment ;;
             --property=Names) echo proxywatch.service ;;
             --property=DropInPaths) if test -e /tmp/system-override; then echo example.conf; fi ;;
-            --property=ActiveState,SubState) if test -e /tmp/system-retrying; then printf 'ActiveState=activating\nSubState=auto-restart\n'; fi ;;
+            --property=ActiveState,SubState) if test -e /tmp/system-retrying; then printf 'ActiveState=activating\nSubState=auto-restart\n'; elif test -e /tmp/system-failed; then printf 'ActiveState=failed\nSubState=failed\n'; fi ;;
+            --property=ActiveState) if test -e /tmp/system-failed; then echo failed; fi ;;
             --property=NeedDaemonReload) echo no ;;
             *) exit 2 ;;
         esac ;;
@@ -259,6 +273,17 @@ printf '%s\n' 'echo recovery-menu-open' > tui
 output=$(script -qec 'bash /release/install.sh --from /tmp/system-release --version v9.8.7' /dev/null </dev/null)
 [[ $output == *'recovery-menu-open'* && ! -s /tmp/system-actions ]]
 rm /tmp/system-retrying
+# A stale failure in the disabled system scope must not hide a running root user unit.
+rm /tmp/system-enabled /tmp/system-active
+touch /tmp/system-failed
+perl -MSocket -e 'my $s; socket($s, AF_UNIX, SOCK_STREAM, 0) && bind($s, sockaddr_un("/run/user/0/bus")) or die $!'
+install /bin/true "$binary"
+output=$(changed_system)
+[[ $output == *'Restarted the active Proxywatch user service'* && $output != *'failed to start'* ]]
+[[ $(cat /tmp/system-actions) == $'--user daemon-reload\n--user try-restart proxywatch.service' ]]
+: > /tmp/system-actions
+rm /tmp/system-failed /run/user/0/bus
+touch /tmp/system-active /tmp/system-enabled
 for custom in fragment override; do
     if [[ $custom == fragment ]]; then echo /etc/systemd/system/proxywatch.service > /tmp/system-fragment
     else echo "$system_unit" > /tmp/system-fragment; touch /tmp/system-override; fi
