@@ -7,9 +7,9 @@ Proxywatch gives Linux applications a stable local HTTP or SOCKS5 proxy. It chec
 ## Features
 
 - Run HTTP, SOCKS5 (TCP), or both. The default endpoints are `127.0.0.1:10809` for HTTP and `127.0.0.1:10808` for SOCKS5.
-- Read VLESS/REALITY/Vision over TCP and Hysteria2 nodes from a Mihomo YAML subscription. You can use a link from Remnawave, Marzban, or 3x-ui (X-UI) when the panel serves a compatible `proxies` list. Setup only needs the subscription URL. If a refresh fails, Proxywatch keeps the last valid list.
+- Read VLESS/REALITY/Vision over TCP and Hysteria2 nodes from a Mihomo YAML subscription. You can use a link from Remnawave, Marzban, or 3x-ui (X-UI) when the panel serves a compatible `proxies` list. Hysteria2 profiles may include the generic `client-fingerprint` field. Their QUIC connection uses the profile’s TLS settings, including certificate pinning with `fingerprint` when supplied. Setup only needs the subscription URL. If a refresh fails, Proxywatch keeps the last valid list.
 - Choose the preferred node by the fastest successful HTTP check. By default, Proxywatch checks the active node every 30 seconds and reserves every 15 minutes. After three consecutive failures it checks the reserves immediately. When the preferred node recovers, new connections return to it. During a total outage forwarding stops. Existing connections may need to reconnect.
-- Receive Telegram alerts through the active proxy and email via direct SMTP during a total outage or when Telegram delivery fails. Alerts show UTC and the server’s local time when it differs.
+- Receive a status summary every 30 minutes by default when a notification channel is configured. Telegram sends through the active proxy. Direct SMTP provides a fallback during a total outage or if Telegram delivery fails. Alerts show UTC and the server’s local time when it differs.
 - Inspect node health and event history in the terminal, or read machine-readable status from a script. History and queued alerts are stored locally in SQLite.
 
 ## Install or update
@@ -25,17 +25,21 @@ If you are already root, run `bash install.sh` without `sudo`.
 
 The installer checks SHA-256 and uses an existing compatible [Xray-core](https://github.com/XTLS/Xray-core) (26.7.28 or later). If Xray is missing or too old, it installs a verified copy of 26.7.28 in `/usr/local/lib/proxywatch/xray` automatically. The system copy stays available to other applications. On Debian or Ubuntu, the online installer uses APT to install `unzip` if both `unzip` and Python 3 are missing. Use `--non-interactive` for unattended installation. See `bash install.sh --help` for offline installation or a specific version.
 
-Updates preserve settings and the database. An identical release leaves the installed application and its running service untouched. When files change, the installer restarts the invoking account’s active packaged service if available and reports when a manual restart is needed. The primary command is `proxywatch`. The installer adds the shortcut `pwch` when available.
+Updates preserve settings and the database. An identical release leaves the installed application and its running service untouched. When files change, the installer restarts the invoking account’s active packaged service if available and reports when a manual restart is needed. The primary command is `proxywatch`. The installer adds the shortcut `pwch` when available. It also makes the commands available in minimal root shells such as Proxmox `pct enter` through free names in `/usr/bin`. The installed binary is `/usr/local/bin/proxywatch`.
 
 ## First run
 
 1. Interactive installation opens setup for the invoking account whenever its settings are missing, including after an interrupted install. You can reopen it with `proxywatch`. Choose a language, name the installation, enter the subscription URL, and choose a URL that your applications need to reach.
-2. Choose the local protocols and ports. If another Xray already listens on your preferred port, test Proxywatch on a free port first. To reuse the original address, free that listener before switching. Optionally configure Telegram, SMTP, or subscription device identification.
+2. Choose the local protocols and ports. If another Xray already listens on your preferred port, test Proxywatch on a free port first. To reuse the original address, follow the handover prompts below. Optionally configure Telegram, SMTP, or subscription device identification.
 3. Save your settings. In a root console without a systemd user manager, Proxywatch enables the system service `proxywatch.service` for the configuration in `/root/.config/proxywatch`. It keeps running after you close the terminal. Check it with `systemctl status proxywatch.service`. In a regular user session, setup uses that account’s user service. When systemd is unavailable, setup offers to run Proxywatch in the terminal. Point your application at the chosen local endpoint.
 
 Reopen `proxywatch` to change settings, view skipped subscription entries, or inspect events. The default data directory is `~/.config/proxywatch` (or `$XDG_CONFIG_HOME/proxywatch`). Use `--directory PATH` for a separate instance.
 
 Under **Checks and intervals**, select additional resources or add your own URLs. Press Enter to keep the suggested interval. For example, set Gemini to `86400` seconds to check it once a day while the primary Telegram check runs every `30` seconds. Additional results appear in the status screen. The primary check controls failover.
+
+### Notifications
+
+In **Settings → Notifications**, choose periodic summaries or delivery only when something changes, and set the delivery interval. The first report can be sent immediately. Later changes share a report for the interval. Detailed events remain in local history. The Telegram bot only sends outgoing messages to the configured chat using the bot token and chat ID.
 
 ### Reusing ports from an existing Xray
 
@@ -43,7 +47,9 @@ Enter the new subscription in setup and select the loopback ports your applicati
 
 Choose the transfer to test the new subscription through a temporary proxy while Xray continues serving clients. After a successful check, the wizard asks for permission to stop the service and checks again for active connections. There is a short interruption during the switch. If the new route fails its checks on the requested ports, Proxywatch attempts to restore Xray. If ownership is uncertain, the service has other listeners, or the existing endpoints require authentication or UDP, choose different ports or migrate them manually.
 
-The transfer preserves both services’ boot settings. If the original `xray.service` is enabled, it can reclaim the ports on reboot. To switch back, stop the corresponding Proxywatch service and start the system `xray.service`. In foreground transfer mode, Ctrl+C returns the ports to Xray automatically. To transfer them again with saved settings, open `proxywatch` (or `pwch`) and choose **Hand over Xray ports**.
+For a trial, choose a temporary handover. Both services keep their existing boot settings. In foreground mode, Ctrl+C returns the ports to Xray.
+
+For a permanent handover, open `proxywatch` (or `pwch`) as root and choose **Hand over Xray ports**. When the installed system service is eligible, select **Permanently, start Proxywatch at boot**. Once traffic passes on the original ports, setup enables `proxywatch.service` and disables autostart for `xray.service`. If Xray already reclaimed the ports after a reboot, use the same menu with your saved settings. A persistent startup failure is rate-limited by systemd. To return ownership to Xray after a permanent handover, stop and disable the system Proxywatch service, then enable and start `xray.service`.
 
 ## CLI for scripts and agents
 
@@ -58,6 +64,8 @@ proxywatch status --json
 A minimal settings file is `{"subscription_url":"https://example.invalid/subscription"}`. The first command writes a complete configuration and fills omitted fields with defaults. Use `--merge` to change selected fields in an existing configuration. Nested objects are merged and arrays are replaced. For example, `{"socks_port":null}` disables SOCKS5 while keeping the HTTP settings. Input is validated before saving. Restart a running daemon after changing settings from the CLI.
 
 For providers that require device identification, set `subscription_hwid` to `true` for an automatic ID derived from the Linux machine ID and provider origin, or to a custom string such as `"my-x-hwid-01"`. Automatic IDs are 64 hexadecimal characters (HMAC-SHA256). A custom ID accepts 10 to 64 ASCII letters, digits, hyphens, or equals signs. Use custom values where you have permission to assign the identifier. The default is `false`. When enabled, Proxywatch sends `x-hwid` with HTTPS subscription requests to the configured origin.
+
+For a summary every half hour, use `proxywatch configure --stdin --merge` with `{"notification_mode":"summary","notification_interval_seconds":1800}`. Use `"changes"` to send only when something changes.
 
 In `diagnostic_urls`, a URL string uses the primary check interval. An object with `interval_seconds` sets an interval for that resource. For example, use this JSON with `--merge`.
 
