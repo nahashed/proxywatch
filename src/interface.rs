@@ -854,6 +854,31 @@ impl Interface {
         } else {
             None
         };
+        if telegram.is_some() || smtp.is_some() {
+            use crate::storage::{MAX_NOTIFICATION_INTERVAL_SECONDS, NotificationMode};
+            let Some(mode) = self.select(
+                tui!(self.language, notify_mode),
+                &[
+                    tui!(self.language, notify_summary),
+                    tui!(self.language, notify_changes),
+                ],
+                usize::from(settings.notification_mode == NotificationMode::Changes),
+            )?
+            else {
+                return Ok(());
+            };
+            let interval = self.positive(
+                tui!(self.language, notify_interval),
+                settings.notification_interval_seconds,
+                MAX_NOTIFICATION_INTERVAL_SECONDS,
+            )?;
+            settings.notification_mode = if mode == 0 {
+                NotificationMode::Summary
+            } else {
+                NotificationMode::Changes
+            };
+            settings.notification_interval_seconds = interval;
+        }
         settings.telegram = telegram;
         settings.smtp = smtp;
         Ok(())

@@ -94,6 +94,10 @@ macro_rules! tui_ru {
     (smtp_route) => { "Почта через SMTP напрямую" };
     (channel_hint) => { "Пробел отмечает канал, Enter подтверждает выбор." };
     (channels) => { "Каналы уведомлений" };
+    (notify_mode) => { "Режим уведомлений" };
+    (notify_summary) => { "Периодическая сводка, даже если ничего не изменилось" };
+    (notify_changes) => { "Только при изменениях" };
+    (notify_interval) => { "Интервал уведомлений в секундах (1800 секунд = 30 минут)" };
     (telegram_token) => { "Токен бота Telegram" };
     (telegram_chat_id) => { "ID чата Telegram" };
     (smtp_host) => { "Сервер SMTP" };

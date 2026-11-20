@@ -94,6 +94,10 @@ macro_rules! tui_en {
     (smtp_route) => { "Email over a direct SMTP connection" };
     (channel_hint) => { "Press Space to select channels and Enter to confirm." };
     (channels) => { "Notification channels" };
+    (notify_mode) => { "Notification mode" };
+    (notify_summary) => { "Periodic summary, even when nothing changes" };
+    (notify_changes) => { "Changes only" };
+    (notify_interval) => { "Notification interval in seconds (1800 seconds = 30 minutes)" };
     (telegram_token) => { "Telegram bot token" };
     (telegram_chat_id) => { "Telegram chat ID" };
     (smtp_host) => { "SMTP server" };
