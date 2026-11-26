@@ -127,6 +127,9 @@ macro_rules! text {
     (conflict_config_changed) => { "An Xray configuration file or directory changed after the service started." };
     (conflict_config_format) => { "The Xray configuration is not supported plain JSON or exceeds the size limit." };
     (conflict_config_fields) => { "The Xray configuration contains unrecognized fields or unsupported value types." };
+    (conflict_legacy_timeout) => { "This Xray version enforces the nonzero HTTP settings.timeout. Automatic handover cannot preserve that idle timeout." };
+    (conflict_timeout_version) => { "The running Xray version could not be verified from its systemd journal. A nonzero HTTP settings.timeout requires Xray 24.9.19 or later for handover." };
+    (conflict_select_both_ports) => { "xray.service serves both HTTP and SOCKS5. Select both existing ports in Proxywatch before transferring the service." };
     (conflict_inbound_policy) => { "An Xray inbound uses unsupported authentication, transport, binding or protocol settings." };
     (conflict_additional_inbound) => { "The Xray configuration declares additional or duplicate proxy listeners." };
     (conflict_descriptors) => { "Cannot inspect the open socket descriptors of the Xray process." };

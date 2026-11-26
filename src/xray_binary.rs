@@ -27,7 +27,7 @@ pub fn setup_binary() -> String {
         .unwrap_or_else(|| default_binary().into())
 }
 
-fn version_number(output: &[u8]) -> Option<[u32; 3]> {
+pub(crate) fn version_number(output: &[u8]) -> Option<[u32; 3]> {
     let mut fields = std::str::from_utf8(output)
         .ok()?
         .lines()

@@ -74,6 +74,70 @@ fn only_explicit_local_plain_unauthenticated_tcp_inbounds_qualify() {
 }
 
 #[test]
+fn legacy_timeout_is_an_http_only_unsigned_setting() {
+    use serde_json::json;
+    let input = |protocol, timeout| {
+        serde_json::from_value::<Inbound>(json!({
+            "listen":"127.0.0.1", "port":10809, "protocol":protocol, "settings":{"timeout":timeout}
+        }))
+    };
+    let mut plain = Ports::default();
+    plain.add(input("http", json!(0)).unwrap()).unwrap();
+    assert_eq!(
+        plain.check_http_timeout(|| panic!("no version query needed")),
+        Ok(())
+    );
+    let mut configured = Ports::default();
+    configured.add(input("http", json!(300)).unwrap()).unwrap();
+    assert_eq!(
+        configured.check_http_timeout(|| Some([1, 8, 24])),
+        Err(Blocker::LegacyHttpTimeout)
+    );
+    assert_eq!(
+        configured.check_http_timeout(|| Some([24, 9, 18])),
+        Err(Blocker::LegacyHttpTimeout)
+    );
+    for version in [[24, 9, 19], [26, 3, 27], [26, 7, 28]] {
+        assert_eq!(configured.check_http_timeout(|| Some(version)), Ok(()));
+    }
+    assert_eq!(
+        configured.check_http_timeout(|| None),
+        Err(Blocker::MissingTimeoutVersion)
+    );
+    for value in [json!(0), json!(300)] {
+        assert_eq!(
+            Ports::default().add(input("socks", value).unwrap()),
+            Err(Blocker::InboundPolicy)
+        );
+    }
+    for value in [
+        json!(null),
+        json!(true),
+        json!("300"),
+        json!(-1),
+        json!(2.5),
+        json!(4_294_967_296u64),
+    ] {
+        assert!(input("http", value).is_err());
+    }
+}
+
+#[test]
+fn the_running_version_requires_one_complete_xray_startup_banner() {
+    let banner = "Xray 26.3.27 (Xray, Penetrates Everything.) build (go1.26 linux/amd64)\n";
+    assert_eq!(banner_version(banner.as_bytes()), Some([26, 3, 27]));
+    for bad in [
+        "",
+        "Xray 26.3.27",
+        "Xray v26.3.27 (Xray, Penetrates Everything.)",
+        "Xray 26.3.27 extra (Xray, Penetrates Everything.)",
+        &banner.repeat(2),
+    ] {
+        assert_eq!(banner_version(bad.as_bytes()), None);
+    }
+}
+
+#[test]
 fn rejects_missing_or_implicit_configuration_sources() {
     for args in [
         &b"xray\0run\0"[..],
@@ -116,6 +180,12 @@ fn distinguishes_owned_listeners_from_other_sockets_and_active_traffic() {
     };
     let inspect = |rows: &[Socket]| check_sockets(&owned, rows, &declared, selected);
     assert_eq!(inspect(&[http, socks]), Ok(None));
+    for one_port in [[selected[0], None], [None, selected[1]]] {
+        assert_eq!(
+            check_sockets(&owned, &[http, socks], &declared, one_port),
+            Err(Blocker::SelectBothPorts)
+        );
+    }
     assert_eq!(inspect(&[http]), Err(Blocker::SocketMismatch));
     for invalid in [
         Socket {

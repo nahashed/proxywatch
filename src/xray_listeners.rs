@@ -69,6 +69,9 @@ pub(crate) enum Blocker {
     ConfigFormat,
     ConfigFields,
     InboundPolicy,
+    LegacyHttpTimeout,
+    MissingTimeoutVersion,
+    SelectBothPorts,
     AdditionalInbound,
     Descriptors,
     SocketTables,
@@ -111,6 +114,9 @@ impl Blocker {
             Self::ConfigChanged => message!(conflict_config_changed),
             Self::ConfigFormat => message!(conflict_config_format),
             Self::ConfigFields => message!(conflict_config_fields),
+            Self::LegacyHttpTimeout => message!(conflict_legacy_timeout),
+            Self::MissingTimeoutVersion => message!(conflict_timeout_version),
+            Self::SelectBothPorts => message!(conflict_select_both_ports),
             Self::InboundPolicy => message!(conflict_inbound_policy),
             Self::AdditionalInbound => message!(conflict_additional_inbound),
             Self::Descriptors => message!(conflict_descriptors),
@@ -167,12 +173,19 @@ struct Inbound {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct Options {
+    #[serde(deserialize_with = "http_timeout")]
+    timeout: Option<u32>,
     auth: Option<String>,
     udp: bool,
     // No account entries can be represented without failing validation.
     accounts: Vec<IgnoredAny>,
     allow_transparent: bool,
     user_level: u32,
+}
+
+// Absence is valid. An explicit null, string or negative timeout is not an integer setting.
+fn http_timeout<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(input).map(Some)
 }
 
 #[derive(Default, Deserialize)]
@@ -198,6 +211,7 @@ struct Ports {
     http: Option<u16>,
     socks: Option<u16>,
     tags: HashSet<String>,
+    nonzero_http_timeout: bool,
 }
 
 impl Ports {
@@ -223,14 +237,31 @@ impl Ports {
             return Err(Blocker::AdditionalInbound);
         }
         let slot = match (inbound.protocol.as_str(), options.auth.as_deref()) {
-            ("http", None) => &mut self.http,
-            ("socks", None | Some("noauth")) => &mut self.socks,
+            ("http", None) => {
+                self.nonzero_http_timeout = options.timeout.is_some_and(|seconds| seconds > 0);
+                &mut self.http
+            }
+            ("socks", None | Some("noauth")) if options.timeout.is_none() => &mut self.socks,
             _ => return Err(Blocker::InboundPolicy),
         };
         slot.replace(inbound.port)
             .is_none()
             .then_some(())
             .ok_or(Blocker::AdditionalInbound)
+    }
+
+    fn check_http_timeout(
+        &self,
+        version: impl FnOnce() -> Option<[u32; 3]>,
+    ) -> Result<(), Blocker> {
+        // XTLS/Xray-core#3817 removed the HTTP ConnectionIdle override in v24.9.19.
+        // On earlier releases zero already left the shared timeout policy in effect.
+        if self.nonzero_http_timeout
+            && version().ok_or(Blocker::MissingTimeoutVersion)? < [24, 9, 19]
+        {
+            return Err(Blocker::LegacyHttpTimeout);
+        }
+        Ok(())
     }
 
     fn assign(&self, http: Option<u16>, socks: Option<u16>) -> Option<(Option<u16>, Option<u16>)> {
@@ -261,6 +292,7 @@ struct Service {
     pid: u32,
     started_us: u64,
     group: PathBuf,
+    invocation: Option<String>,
 }
 
 fn output(program: &str, args: &[&str]) -> Option<std::process::Output> {
@@ -298,7 +330,7 @@ fn service() -> Result<Service, Blocker> {
             "--all",
             "xray.service",
             "-p",
-            "Id,Names,LoadState,ActiveState,SubState,MainPID,ExecMainPID,ControlGroup",
+            "Id,Names,LoadState,ActiveState,SubState,MainPID,ExecMainPID,ControlGroup,InvocationID",
             "-p",
             "RefuseManualStop,BoundBy,RequiredBy,ConsistsOf,PropagatesStopTo,TriggeredBy",
         ],
@@ -371,7 +403,50 @@ fn service() -> Result<Service, Blocker> {
         pid,
         started_us,
         group: group.to_owned(),
+        invocation: fields
+            .get("InvocationID")
+            .filter(|id| id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit()))
+            .map(|id| (*id).to_owned()),
     })
+}
+
+// Read the startup banner produced by this invocation. The installed private Xray may
+// be newer than the service, and inspecting a service must never execute its binary as root.
+fn journal_version(service: &Service) -> Option<[u32; 3]> {
+    let invocation = service.invocation.as_deref()?;
+    let start = service.started_us / 1_000_000;
+    let journal = output(
+        "/usr/bin/journalctl",
+        &[
+            "--boot",
+            "--quiet",
+            "--no-pager",
+            "--output=cat",
+            "--lines=2",
+            r"--grep=^Xray [0-9.]+ \(Xray, Penetrates Everything\.\)",
+            &format!("--since=@{}", start.saturating_sub(1)),
+            &format!("--until=@{}", start + 30),
+            &format!("_SYSTEMD_INVOCATION_ID={invocation}"),
+            "_SYSTEMD_UNIT=xray.service",
+            "_TRANSPORT=stdout",
+            &format!("_PID={}", service.pid),
+        ],
+    )?;
+    if !journal.status.success() {
+        return None;
+    }
+    banner_version(&journal.stdout)
+}
+
+fn banner_version(bytes: &[u8]) -> Option<[u32; 3]> {
+    let mut lines = std::str::from_utf8(bytes).ok()?.lines();
+    let (version, _) = lines
+        .next()?
+        .split_once(" (Xray, Penetrates Everything.)")?;
+    if lines.next().is_some() || version.split_ascii_whitespace().count() != 2 {
+        return None;
+    }
+    crate::xray_binary::version_number(version.as_bytes())
 }
 
 fn unchanged(metadata: &fs::Metadata, started_us: u64) -> bool {
@@ -656,6 +731,13 @@ fn check_sockets(
                 return Err(Blocker::ForeignListener);
             }
             if !wanted {
+                if !selected
+                    && declared.http.is_some()
+                    && declared.socks.is_some()
+                    && [declared.http, declared.socks].contains(&Some(row.port))
+                {
+                    return Err(Blocker::SelectBothPorts);
+                }
                 return Err(Blocker::OtherListener);
             }
             if row.address != Address::Loopback {
@@ -855,6 +937,7 @@ fn verified(
             .count(),
     );
     let busy = check_sockets(&owned, rows, &config, requested)?;
+    config.check_http_timeout(|| journal_version(&first))?;
     let listeners = rows
         .iter()
         .filter(|r| r.listen && owned.contains(&r.inode))
