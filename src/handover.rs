@@ -324,6 +324,24 @@ impl BootPlan {
         })
     }
 
+    pub(crate) fn xray_has_boot_dependencies() -> bool {
+        let Some(output) = systemctl(&[
+            "show",
+            "--all",
+            "--property=WantedBy,RequiredBy,UpheldBy",
+            "xray.service",
+        ]) else {
+            return false;
+        };
+        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.split_once('=').is_some_and(|(property, units)| {
+                units
+                    .split_ascii_whitespace()
+                    .any(|unit| property != "WantedBy" || unit != "multi-user.target")
+            })
+        })
+    }
+
     fn commit(&self, service: &UserService<'_>, interrupt: &InterruptGuard) -> Result<()> {
         let inspect = || Self::inspect(StartMode::Service(Scope::System));
         ensure!(

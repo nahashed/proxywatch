@@ -85,6 +85,8 @@ macro_rules! tui_en {
     (route_verified) => { "The health check passed. Proxywatch will use the addresses below." };
     (confirm_permanent) => { "Transfer these ports to Proxywatch permanently and change both boot settings?" };
     (handover_boot_notice) => { "After traffic passes through the new proxy, enable proxywatch.service at boot and disable startup of xray.service." };
+    (handover_boot_dependencies) => { "Another systemd unit can start xray.service. Permanent handover is unavailable. To keep both services running, choose free ports for Proxywatch." };
+    (handover_boot_unavailable) => { "The boot settings for these services could not be verified. Only temporary handover is available." };
     (handover_permanent) => { "Permanently, start Proxywatch at boot" };
     (handover_temporary) => { "Temporarily, keep both boot settings" };
     (handover_duration) => { "How long should Proxywatch own these ports?" };

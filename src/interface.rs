@@ -608,7 +608,10 @@ impl Interface {
         listeners: &crate::xray_listeners::XrayListeners,
         expected_settings: Option<&Settings>,
     ) -> Result<PortAction> {
-        use crate::handover::{BootPlan, StartMode, cutover, verify_route};
+        use crate::{
+            handover::{BootPlan, StartMode, cutover, verify_route},
+            user_service::Scope,
+        };
         let mut candidate = settings.clone();
         candidate.http_port = listeners.http;
         candidate.socks_port = listeners.socks;
@@ -644,6 +647,11 @@ impl Interface {
                 _ => return Ok(PortAction::Back),
             }
         } else {
+            if BootPlan::xray_has_boot_dependencies() {
+                self.line(tui!(self.language, handover_boot_dependencies))?;
+            } else if mode == StartMode::Service(Scope::System) {
+                self.line(tui!(self.language, handover_boot_unavailable))?;
+            }
             None
         };
         match mode {
