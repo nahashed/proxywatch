@@ -28,7 +28,6 @@ pub struct AlertText {
     pub recovery: &'static str,
     pub unknown_time: &'static str,
     pub no_delivery: &'static str,
-    pub token: &'static str,
     pub unreachable: &'static str,
     pub rejected: &'static str,
     pub receipt: &'static str,

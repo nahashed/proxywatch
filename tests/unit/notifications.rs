@@ -357,3 +357,82 @@ fn periodic_summary_uses_telegram_through_a_live_route_and_direct_smtp_during_ou
     }
     Ok(())
 }
+
+#[test]
+fn token_syntax_accepts_ascii_bot_ids_and_url_safe_secrets() {
+    assert!(Telegram::validate_token("123456:AbC_x-Y0123").is_ok());
+    for malformed in [
+        "",
+        "fixture",
+        ":secret",
+        "123:",
+        "id:secret",
+        "123:a:b",
+        "４:x",
+        "123:токен",
+        "123:a b",
+        "123:a/b",
+        "123:a?b",
+        "123:a#b",
+        "123:a\n",
+    ] {
+        assert!(Telegram::validate_token(malformed).is_err());
+    }
+}
+
+#[test]
+fn legacy_malformed_token_falls_back_to_smtp_before_a_telegram_request() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let paths = crate::storage::Paths::resolve(Some(temp.path().to_owned()))?;
+    let legacy = json!({"subscription_url":"https://example.invalid/sub","timeout_seconds":1,
+        "telegram":{"token":"private-canary/?","chat_id":"room"},
+        "smtp":{"host":"example.invalid","port":465,"username":"","password":"",
+                "from":"from@example.invalid","to":"to@example.invalid"}});
+    std::fs::write(
+        temp.path().join("settings.json"),
+        serde_json::to_vec(&legacy)?,
+    )?;
+    let settings = paths.load_settings()?;
+    assert!(settings.validate_for_save().is_err());
+    let file = temp.path().join("settings.json");
+    let metadata = std::fs::metadata(&file)?;
+    assert!(
+        paths
+            .with_handover_settings(Some(&settings), &settings, || panic!(
+                "invalid configuration started"
+            ))
+            .is_err()
+    );
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(std::fs::metadata(file)?.ino(), metadata.ino());
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let client = Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::all(format!(
+            "http://{}",
+            listener.local_addr()?
+        ))?)
+        .build()?;
+    let event = Event {
+        kind: "snapshot".into(),
+        ..Default::default()
+    };
+    let mut sent_by_mail = false;
+    deliver_with(
+        &settings,
+        &event,
+        Some(&client),
+        send_telegram,
+        |_, _, _| {
+            sent_by_mail = true;
+            Ok(())
+        },
+    )?;
+    assert!(sent_by_mail);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    Ok(())
+}

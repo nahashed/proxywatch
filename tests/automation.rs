@@ -209,7 +209,7 @@ fn merge_preserves_unmentioned_settings_and_replaces_arrays_and_nullable_values(
         "subscription_url":"https://example.invalid/sub",
         "http_port":12345,
         "diagnostic_urls":["https://example.invalid/first","https://example.invalid/second"],
-        "telegram":{"token":"private-canary","chat_id":"room"},
+        "telegram":{"token":"123:private-canary","chat_id":"room"},
         "smtp":{"host":"mail.example.invalid","port":465,"username":"account","password":"private-canary","from":"a@example.invalid","to":"b@example.invalid"}
     });
     assert!(
@@ -228,7 +228,7 @@ fn merge_preserves_unmentioned_settings_and_replaces_arrays_and_nullable_values(
     let current: Value = serde_json::from_slice(&saved)?;
     assert_eq!(
         current["telegram"],
-        json!({"token":"private-canary","chat_id":"new-room"})
+        json!({"token":"123:private-canary","chat_id":"new-room"})
     );
     let mut expected_mail = original["smtp"].clone();
     expected_mail["port"] = json!(587);
@@ -325,7 +325,7 @@ fn notification_preferences_default_and_merge_without_touching_credentials() -> 
     let temp = tempfile::tempdir()?;
     let path = temp.path();
     let file = path.join("settings.json");
-    let old = br#"{"subscription_url":"https://example.invalid/sub","telegram":{"token":"private-canary","chat_id":"room"}}"#;
+    let old = br#"{"subscription_url":"https://example.invalid/sub","telegram":{"token":"123:private-canary","chat_id":"room"}}"#;
     fs::write(&file, old)?;
     let args = ["configure", "--stdin", "--merge"];
     let apply = |value: &[u8]| cli(path, &args, value);
@@ -350,6 +350,65 @@ fn notification_preferences_default_and_merge_without_touching_credentials() -> 
         assert!(!error.status.success() && error.stdout.is_empty());
         assert!(!String::from_utf8(error.stderr)?.contains("private-canary"));
         assert_eq!(fs::read(&file)?, saved);
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_telegram_tokens_cannot_replace_or_merge_into_saved_settings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path();
+    let file = path.join("settings.json");
+    let invalid = "private-canary:bot/token";
+    let valid = "123:Fixture_token-2026";
+    for (language, error) in [
+        ("en", "Invalid Telegram token format"),
+        ("ru", "Неверный формат токена Telegram"),
+    ] {
+        let mut settings = json!({"language":language,"subscription_url":"https://example.invalid/sub",
+            "telegram":{"chat_id":"room","token":valid}});
+        assert!(
+            cli(
+                path,
+                &["configure", "--stdin"],
+                &serde_json::to_vec(&settings)?
+            )?
+            .status
+            .success()
+        );
+        let before = fs::read(&file)?;
+        settings["telegram"]["token"] = json!(invalid);
+        for (args, input) in [
+            (&["configure", "--stdin"][..], settings.clone()),
+            (
+                &["configure", "--stdin", "--merge"][..],
+                json!({"telegram":{"token":invalid}}),
+            ),
+        ] {
+            let output = cli(path, args, &serde_json::to_vec(&input)?)?;
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let message = String::from_utf8(output.stderr)?;
+            assert!(message.contains(error));
+            assert!(!message.contains("private-canary") && !message.contains(valid));
+            assert_eq!(fs::read(&file)?, before);
+        }
+        // A legacy configuration is readable by --merge and can be repaired in place.
+        fs::write(&file, serde_json::to_vec(&settings)?)?;
+        let corrected = cli(
+            path,
+            &["configure", "--stdin", "--merge"],
+            &serde_json::to_vec(&json!({"telegram":{"token":valid}}))?,
+        )?;
+        assert!(
+            corrected.status.success()
+                && corrected.stdout.is_empty()
+                && corrected.stderr.is_empty()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&file)?)?["telegram"]["token"],
+            valid
+        );
     }
     Ok(())
 }

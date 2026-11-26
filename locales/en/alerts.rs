@@ -26,7 +26,6 @@ AlertText {
     recovery: "Connection restored",
     unknown_time: "unknown",
     no_delivery: "No route for Telegram and no backup email configured",
-    token: "Invalid Telegram token format",
     unreachable: "Telegram is unreachable through the selected node",
     rejected: "Telegram rejected the notification",
     receipt: "Invalid Telegram receipt",

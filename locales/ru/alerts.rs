@@ -26,7 +26,6 @@ AlertText {
     recovery: "Соединение восстановлено",
     unknown_time: "неизвестно",
     no_delivery: "Нет доступного выхода для Telegram. Резервная почта не настроена",
-    token: "Некорректный формат токена Telegram",
     unreachable: "Telegram недоступен через выбранный выход",
     rejected: "Telegram отклонил уведомление",
     receipt: "Некорректное подтверждение Telegram",

@@ -286,11 +286,6 @@ impl Interface {
                 0,
             )? {
                 Some(0) => {
-                    if let Err(error) = settings.validate() {
-                        self.line(&tui!(self.language, invalid_settings, error))?;
-                        self.pause()?;
-                        continue;
-                    }
                     if self.save(paths, &mut settings, previous)? {
                         return Ok(true);
                     }
@@ -330,6 +325,11 @@ impl Interface {
     ) -> Result<bool> {
         use crate::user_service::{Applied, Scope, UserService, foreground_command};
 
+        if let Err(error) = settings.validate_for_save() {
+            self.line(&tui!(self.language, invalid_settings, error))?;
+            self.pause()?;
+            return Ok(false);
+        }
         match self.resolve_port_conflict(paths, settings, previous, false)? {
             PortAction::Free => (),
             PortAction::Back | PortAction::Edit => return Ok(false),
@@ -960,11 +960,19 @@ impl Interface {
         };
         let telegram = if selected.contains(&0) {
             let existing = settings.telegram.as_ref();
+            let current = existing
+                .map(|t| t.token.as_str())
+                .filter(|token| Telegram::validate_token(token).is_ok())
+                .unwrap_or("");
+            let token = loop {
+                let token = self.secret(tui!(self.language, telegram_token), current)?;
+                match Telegram::validate_token(&token) {
+                    Ok(()) => break token,
+                    Err(error) => self.line(&error.to_string())?,
+                }
+            };
             Some(Telegram {
-                token: self.secret(
-                    tui!(self.language, telegram_token),
-                    existing.map_or("", |t| t.token.as_str()),
-                )?,
+                token,
                 chat_id: self.text(
                     tui!(self.language, telegram_chat_id),
                     existing.map_or("", |t| t.chat_id.as_str()),

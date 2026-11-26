@@ -48,6 +48,23 @@ pub struct Telegram {
     pub chat_id: String,
 }
 
+impl Telegram {
+    pub fn validate_token(token: &str) -> Result<()> {
+        ensure!(
+            token.split_once(':').is_some_and(|(id, secret)| {
+                !id.is_empty()
+                    && id.bytes().all(|ch| ch.is_ascii_digit())
+                    && !secret.is_empty()
+                    && secret
+                        .bytes()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
+            }),
+            message!(telegram_token_format)
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Smtp {
@@ -132,6 +149,15 @@ fn valid_label(value: &str, limit: usize) -> bool {
 }
 
 impl Settings {
+    // Pre-existing configurations with a malformed Telegram token can still use SMTP.
+    pub fn validate_for_save(&self) -> Result<()> {
+        self.validate()?;
+        if let Some(telegram) = &self.telegram {
+            Telegram::validate_token(&telegram.token)?;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             !self.instance_name.trim().is_empty()
@@ -335,6 +361,7 @@ impl Paths {
         settings: &Settings,
         start: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        settings.validate_for_save()?;
         let _guard = self.lock_settings()?;
         let path = self.directory.join("settings.json");
         ensure!(
@@ -349,7 +376,7 @@ impl Paths {
         } else {
             None
         };
-        let attempt = self.write_settings(settings).and_then(|()| start());
+        let attempt = self.persist_settings(settings).and_then(|()| start());
         if attempt.is_err() {
             if let Some(original) = backup {
                 original
@@ -370,7 +397,11 @@ impl Paths {
         Ok(directory)
     }
     fn write_settings(&self, settings: &Settings) -> Result<()> {
-        settings.validate()?;
+        settings.validate_for_save()?;
+        self.persist_settings(settings)
+    }
+
+    fn persist_settings(&self, settings: &Settings) -> Result<()> {
         self.write("settings.json", settings)
             .map_err(|_| anyhow::anyhow!(message!(save_settings)))
     }

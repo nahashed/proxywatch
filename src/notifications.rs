@@ -274,17 +274,7 @@ fn send_telegram(
     alert: &Alert,
     timeout: Duration,
 ) -> Result<()> {
-    ensure!(
-        config.token.split_once(':').is_some_and(|(id, secret)| {
-            !id.is_empty()
-                && id.bytes().all(|value| value.is_ascii_digit())
-                && !secret.is_empty()
-                && secret
-                    .bytes()
-                    .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
-        }),
-        alerts(language()).token
-    );
+    Telegram::validate_token(&config.token)?;
     let response = client
         .post(format!(
             "https://api.telegram.org/bot{}/sendMessage",

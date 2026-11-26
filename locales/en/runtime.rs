@@ -88,6 +88,7 @@ macro_rules! text {
     (system_activation_started) => { "The Proxywatch system service is enabled and running with the saved settings." };
     (diagnostic_interval) => { "Set one interval per resource, between 1 and 2592000 seconds" };
     (invalid_diagnostics) => { "Specify the Xray path and up to 16 diagnostic URLs" };
+    (telegram_token_format) => { "Invalid Telegram token format. Use a numeric bot ID, a colon, and a secret containing only ASCII letters, digits, underscores or hyphens." };
     (telegram_credentials) => { "Telegram requires a bot token and a chat ID" };
     (smtp_settings) => { "Check the SMTP settings and email addresses" };
     (truncated_history) => { "History was truncated before it could be saved" };
