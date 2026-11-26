@@ -21,6 +21,18 @@ touch /tmp/untrusted-xray-executed
 XRAY
 chmod 755 /tmp/user-bin/xray
 archive=proxywatch-${tag#v}-linux-$(uname -m).tar.gz
+if [[ $(printf '%s\n' 0.1.5 "${tag#v}" | sort -V | head -1) == 0.1.5 ]]; then
+    notice_dir=${archive%.tar.gz}/THIRD-PARTY-LICENSES
+    tar -xzf "/release/$archive" -C /tmp "$notice_dir"
+    (
+        cd "/tmp/$notice_dir"
+        sha256sum --strict --status -c SHA256SUMS
+        test -s index.json
+        test -s ring-*/LICENSE-BoringSSL
+        test -s ring-*/third_party/fiat/LICENSE
+        grep -qi 'Community Data License Agreement' webpki-roots-*/LICENSE
+    )
+fi
 mkdir /tmp/no-xray
 cp /release/SHA256SUMS "/release/$archive" /tmp/no-xray/
 if output=$(PATH="/tmp/user-bin:$PATH" bash /release/install.sh --from /tmp/no-xray --version "$tag" 2>&1); then exit 1; fi
