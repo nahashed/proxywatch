@@ -39,11 +39,11 @@ Under **Checks and intervals**, select additional resources or add your own URLs
 
 ### Notifications
 
-In **Settings → Notifications**, choose periodic summaries or delivery only when something changes, and set the delivery interval. The first report can be sent immediately. Later changes share a report for the interval. Detailed events remain in local history. The Telegram bot only sends outgoing messages to the configured chat using the bot token and chat ID.
+In **Settings → Notifications**, choose periodic summaries or delivery only when something changes, and set the delivery interval. The first report can be sent immediately. Later changes share a report for the interval. Detailed events remain in local history. The Telegram bot sends messages to the configured chat. Paste the full token from BotFather in the form `bot_id:secret` and enter the chat ID. Proxywatch stores the credentials in `settings.json` with access limited to the account that runs the service.
 
 ### Reusing ports from an existing Xray
 
-Enter the new subscription in setup and select the loopback ports your applications already use. Free ports work alongside your existing service. During first setup as root, an installed Proxywatch can also offer to take over the ports of a dedicated system `xray.service`. The wizard identifies HTTP and SOCKS5 from Xray's running configuration and verifies which process owns the listeners. It keeps each protocol on its original port.
+Enter the new subscription in setup and select the loopback ports your applications already use. Free ports work alongside your existing service. During first setup as root, an installed Proxywatch can also offer to take over the ports of a dedicated system `xray.service`. The wizard identifies HTTP and SOCKS5 from Xray's running configuration and verifies which process owns the listeners. It keeps each protocol on its original port. If Xray has both an HTTP and a SOCKS5 listener, select both before handing over the service.
 
 If a port is busy during setup, the wizard opens the port conflict screen. With saved settings, open the same screen from the main menu. It shows the local address, the listener’s owner when it can be identified, and what is blocking the transfer. You can test the subscription on a temporary port while the existing proxy still serves its clients. When you are ready to switch, pause the clients and check the ports again. You can also choose a different port to keep both services running.
 
@@ -51,7 +51,7 @@ Choose the transfer to test the new subscription through a temporary proxy while
 
 For a trial, choose a temporary handover. Both services keep their existing boot settings. In foreground mode, Ctrl+C returns the ports to Xray.
 
-For a permanent handover, open `proxywatch` (or `pwch`) as root and open **Resolve port conflict** and choose the handover option. When the installed system service is eligible, select **Permanently, start Proxywatch at boot**. Once traffic passes on the original ports, setup enables `proxywatch.service` and disables autostart for `xray.service`. If Xray already reclaimed the ports after a reboot, use the same menu with your saved settings. A persistent startup failure is rate-limited by systemd. To return ownership to Xray after a permanent handover, stop and disable the system Proxywatch service, then enable and start `xray.service`.
+For a permanent handover, open `proxywatch` (or `pwch`) as root and open **Resolve port conflict** and choose the handover option. When the installed system service is eligible, select **Permanently, start Proxywatch at boot**. If another systemd unit can start Xray, the wizard explains why permanent handover is unavailable. Once traffic passes on the original ports, setup enables `proxywatch.service` and disables autostart for `xray.service`. If Xray already reclaimed the ports after a reboot, use the same menu with your saved settings. A persistent startup failure is rate-limited by systemd. To return ownership to Xray after a permanent handover, stop and disable the system Proxywatch service, then enable and start `xray.service`.
 
 ## CLI for scripts and agents
 
@@ -82,3 +82,5 @@ In `diagnostic_urls`, a URL string uses the primary check interval. An object wi
 Report bugs and suggest changes in [GitHub Issues](https://github.com/nahashed/proxywatch/issues). Remove subscription URLs, bot tokens, and SMTP passwords from reports.
 
 Licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+The Linux release archives include dependency license texts and notices in `THIRD-PARTY-LICENSES/`.
