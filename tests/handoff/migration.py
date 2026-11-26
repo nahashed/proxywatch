@@ -133,9 +133,11 @@ def start_fixtures(stack):
     return config
 
 
-def start_legacy(extra=False, foreign=False, restart_condition=None, http_only=False):
+def start_legacy(extra=False, foreign=False, restart_condition=None, http_only=False, http_timeout=None):
     def inbound(protocol, port):
         options = {"auth": "noauth", "udp": False} if protocol == "socks" else {}
+        if protocol == "http" and http_timeout is not None:
+            options["timeout"] = http_timeout
         return {"listen": "127.0.0.1", "port": port, "protocol": protocol, "settings": options}
     inputs = [] if http_only else [inbound("socks", SOCKS_PORT)]
     if not foreign:
@@ -630,7 +632,9 @@ def permanent(name, config):
     run("install", "-Dm644", "/fixture/proxywatch-system.service",
         "/usr/local/lib/systemd/system/proxywatch.service")
     run("systemctl", "daemon-reload")
-    start_legacy(http_only=name == "system-permanent")
+    dependent = name == "system-permanent-dependent"
+    http_only = name == "system-permanent"
+    start_legacy(http_only=http_only, http_timeout=300 if dependent or http_only else None)
     old_files = (CONFIG.read_bytes(), UNIT.read_bytes())
     SETTINGS.mkdir(parents=True, mode=0o700)
     saved = json.dumps({"language": "en", "instance_name": "Saved installation",
@@ -638,7 +642,13 @@ def permanent(name, config):
         "diagnostic_urls": [], "xray_binary": XRAY, "interval_seconds": 2})
     (SETTINGS / "settings.json").write_text(saved)
     boot_rollback = name == "system-permanent-rollback"
-    if boot_rollback:
+    if dependent:
+        client = Path("/etc/systemd/system/handoff-client.service")
+        client.write_text("[Unit]\nWants=xray.service\nAfter=xray.service\n"
+                          "[Service]\nType=oneshot\nExecStart=/bin/true\nRemainAfterExit=yes\n")
+        run("systemctl", "daemon-reload")
+        run("systemctl", "start", client.name)
+    elif boot_rollback:
         # This unloaded target has an additional administrator-created enablement link.
         # The post-reload state must reject the change and restore both original flags.
         other = Path("/etc/systemd/system/handoff-unused.target.wants/xray.service")
@@ -663,26 +673,38 @@ def permanent(name, config):
     try:
         with Wizard() as wizard:
             wizard.saved_handover()
-            wizard.choose("How long should Proxywatch own these ports?", "j\r")
-            wizard.wait("Transfer these ports to Proxywatch permanently")
-            assert enabled("xray.service") == "enabled" and active("xray.service")
-            wizard.send("k\r")
-            if boot_rollback:
-                wizard.wait("The change to boot settings failed.", 75)
-                assert enabled("proxywatch.service") == "disabled"
+            if dependent:
+                wizard.wait("Another systemd unit can start xray.service.")
+                wizard.wait("Temporarily stop xray.service")
+                wizard.send("\r")
                 assert enabled("xray.service") == "enabled" and active("xray.service")
+                assert not active("proxywatch.service")
                 assert (SETTINGS / "settings.json").read_text() == saved
-                assert other.readlink() == UNIT
                 verify_traffic(b"direct")
             else:
-                wizard.wait("The Proxywatch system service is running", 75)
-                assert enabled("proxywatch.service") == "enabled" and active("proxywatch.service")
-                assert enabled("xray.service") == "disabled" and not active("xray.service")
-                verify_traffic(b"upstream")
+                wizard.choose("How long should Proxywatch own these ports?", "j\r")
+                wizard.wait("Transfer these ports to Proxywatch permanently")
+                assert enabled("xray.service") == "enabled" and active("xray.service")
+                wizard.send("k\r")
+                if boot_rollback:
+                    wizard.wait("The change to boot settings failed.", 75)
+                    assert enabled("proxywatch.service") == "disabled"
+                    assert enabled("xray.service") == "enabled" and active("xray.service")
+                    assert (SETTINGS / "settings.json").read_text() == saved
+                    assert other.readlink() == UNIT
+                    verify_traffic(b"direct")
+                else:
+                    wizard.wait("The Proxywatch system service is running", 75)
+                    assert enabled("proxywatch.service") == "enabled" and active("proxywatch.service")
+                    assert enabled("xray.service") == "disabled" and not active("xray.service")
+                    verify_traffic(b"upstream")
         assert (CONFIG.read_bytes(), UNIT.read_bytes()) == old_files
     finally:
         upstream.terminate()
         upstream.wait(timeout=5)
+    if dependent:
+        run("systemctl", "stop", client.name)
+        client.unlink()
     if boot_rollback:
         other.unlink()
     if name != "system-permanent":
@@ -742,7 +764,8 @@ def main():
         scenarios = ("busy", "foreign", "extra", "probe-failure", "late-client", "success", "rollback", "restore-failed", "foreground",
                      "manager-change", "system-handover", "system-first-save", "system-saved",
                      "saved-busy", "saved-foreign", "saved-changed", "saved-restricted", "saved-new-ports",
-                     "system-permanent-rollback", "system-permanent-failed", "system-permanent")
+                     "system-permanent-dependent", "system-permanent-rollback",
+                     "system-permanent-failed", "system-permanent")
         selected = sys.argv[1:] or scenarios
         for name in sorted(selected, key=lambda item: item == "system-permanent"):
             if name not in scenarios:
